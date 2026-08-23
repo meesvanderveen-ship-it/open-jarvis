@@ -12,6 +12,56 @@ from typing import Any, Iterator
 _PROCESS_LOCK_REGISTRY_GUARD = threading.RLock()
 _ACTIVE_PROCESS_LOCKS: dict[str, dict[str, Any]] = {}
 
+# Bestandsvergrendeling verschilt per platform: POSIX heeft fcntl.flock,
+# Windows heeft msvcrt.locking. Beide geven dezelfde garantie die de runner
+# nodig heeft -- een tweede proces kan de lock niet krijgen -- dus de
+# aanroepende code hoeft het verschil niet te kennen.
+_LOCK_BYTES = 1
+
+# Vaste breedte voor de pid op Windows, zodat een kortere pid de vorige
+# waarde volledig overschrijft zonder te truncaten.
+_PID_FIELD_WIDTH = 20
+
+
+class LockUnavailableError(Exception):
+    """De lock wordt al door een ander proces gehouden."""
+
+
+def _acquire_file_lock(handle) -> None:
+    """Neem een exclusieve, niet-blokkerende lock op `handle`.
+
+    Gooit LockUnavailableError als een ander proces de lock houdt.
+    """
+    if os.name == "nt":
+        import msvcrt
+
+        handle.seek(0)
+        try:
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, _LOCK_BYTES)
+        except OSError as exc:
+            raise LockUnavailableError from exc
+        return
+
+    import fcntl
+
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError as exc:
+        raise LockUnavailableError from exc
+
+
+def _release_file_lock(handle) -> None:
+    if os.name == "nt":
+        import msvcrt
+
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, _LOCK_BYTES)
+        return
+
+    import fcntl
+
+    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
 
 def unique_tmp_path(path: str | Path) -> Path:
     target = Path(path)
@@ -66,8 +116,6 @@ def process_lock(path: str | Path, *, allow_reentrant: bool = False) -> Iterator
     lifecycle apply work share the runner lock without weakening the normal
     duplicate-run guard.
     """
-    import fcntl
-
     lock_path = Path(path)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     canonical_path = str(lock_path.resolve())
@@ -121,15 +169,22 @@ def process_lock(path: str | Path, *, allow_reentrant: bool = False) -> Iterator
     acquired = False
     try:
         try:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
+            _acquire_file_lock(fh)
+        except LockUnavailableError as exc:
             fh.seek(0)
             existing = fh.read().strip()
             raise RuntimeError(f"process_lock_already_active:{lock_path}:pid={existing or 'unknown'}") from exc
         acquired = True
         fh.seek(0)
-        fh.truncate()
-        fh.write(str(pid))
+        if os.name != "nt":
+            # Op Windows valt de vergrendelde byte binnen het bestand; die
+            # wegtruncaten zou de lock onder onze eigen voeten verwijderen.
+            # De pid wordt daar met vaste breedte overschreven in plaats van
+            # het bestand te legen.
+            fh.truncate()
+            fh.write(str(pid))
+        else:
+            fh.write(str(pid).ljust(_PID_FIELD_WIDTH))
         fh.flush()
         with _PROCESS_LOCK_REGISTRY_GUARD:
             active = _ACTIVE_PROCESS_LOCKS.get(canonical_path)
@@ -140,8 +195,9 @@ def process_lock(path: str | Path, *, allow_reentrant: bool = False) -> Iterator
         try:
             if acquired:
                 fh.seek(0)
-                fh.truncate()
-                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+                if os.name != "nt":
+                    fh.truncate()
+                _release_file_lock(fh)
         finally:
             fh.close()
             with _PROCESS_LOCK_REGISTRY_GUARD:

@@ -92,6 +92,13 @@ generated reports — is intentionally **not** part of this repository (see
 
 ## Setup
 
+**Windows, zonder programmeerervaring:** volg
+[`INSTALLATIE-WINDOWS.md`](INSTALLATIE-WINDOWS.md). Dubbelklik
+`INSTALLEREN-WINDOWS.bat` om te installeren en `START-JARVIS.bat` om te
+starten; de rest van deze paragraaf is dan niet nodig.
+
+**Handmatig (macOS, Linux, of Windows via de opdrachtprompt):**
+
 ```bash
 git clone git@github.com:Drent301/AI-TRADINGBOT.git
 cd AI-TRADINGBOT

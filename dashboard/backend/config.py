@@ -20,8 +20,23 @@ TOOLS_ROOT = PROJECT_ROOT / "tools"
 
 # tools/show_*.py import `bot.*`, which requires the bot's own venv (not the
 # dashboard's). We only ever invoke it with a fixed argv, never shell=True.
-_BOT_VENV_PYTHON = PROJECT_ROOT / ".venv" / "bin" / "python3"
-BOT_PYTHON_EXECUTABLE = str(_BOT_VENV_PYTHON) if _BOT_VENV_PYTHON.exists() else "python3"
+def _resolve_bot_python() -> str:
+    """Zoek de Python van de bot-venv, op zowel POSIX als Windows.
+
+    Windows plaatst de interpreter in .venv\\Scripts\\python.exe in plaats van
+    .venv/bin/python3, en heeft doorgaans geen commando 'python3' op PATH.
+    """
+    candidates = (
+        PROJECT_ROOT / ".venv" / "bin" / "python3",
+        PROJECT_ROOT / ".venv" / "Scripts" / "python.exe",
+    )
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+    return "python" if os.name == "nt" else "python3"
+
+
+BOT_PYTHON_EXECUTABLE = _resolve_bot_python()
 
 HOST = os.environ.get("DASHBOARD_HOST", "127.0.0.1")
 PORT = int(os.environ.get("DASHBOARD_PORT", "8000"))

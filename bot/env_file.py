@@ -107,7 +107,10 @@ def _atomic_write(target: Path, content: str) -> None:
     handle, temp_name = tempfile.mkstemp(dir=str(target.parent), prefix=".env.", suffix=".tmp")
     temp_path = Path(temp_name)
     try:
-        os.fchmod(handle, _OWNER_ONLY)
+        # os.fchmod bestaat niet op Windows; daar zorgt mkstemp zelf al voor
+        # een bestand dat alleen voor de aanmakende gebruiker toegankelijk is.
+        if hasattr(os, "fchmod"):
+            os.fchmod(handle, _OWNER_ONLY)
         with os.fdopen(handle, "w", encoding="utf-8") as stream:
             stream.write(content)
             stream.flush()
@@ -136,7 +139,15 @@ def ensure_env_from_example(path: Path | None = None) -> tuple[Path, bool]:
 
 
 def permissions_are_owner_only(path: Path | None = None) -> bool:
+    """True als alleen de eigenaar het bestand kan lezen.
+
+    De POSIX-rechtenbits die dit meet bestaan niet op Windows; daar erft het
+    bestand de NTFS-rechten van de map en is deze controle niet zinvol, dus
+    die meldt geen valse waarschuwing.
+    """
     target = path or env_path()
     if not target.exists():
         return False
+    if os.name == "nt":
+        return True
     return (target.stat().st_mode & 0o077) == 0
