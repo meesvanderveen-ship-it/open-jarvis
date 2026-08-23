@@ -262,6 +262,8 @@ Stap 6 vóór en na elke wijziging om te controleren wat er feitelijk gebeurt.
 |---|---|
 | `ModuleNotFoundError` bij het starten | Je hebt de venv niet geactiveerd (Stap 2) of `pip install` niet (opnieuw) gedraaid (Stap 3). |
 | Geen LLM-output / lege analyses | Geen geldige `OPENAI_API_KEY`/`ANTHROPIC_API_KEY` in `.env`. |
+| `COINBASE_API_SECRET heeft een onbekend formaat` | De waarde is geen PEM-blok en geen base64-sleutel. Neem het veld `privateKey` uit het Coinbase-JSON-bestand letterlijk over, zonder aanhalingstekens en zonder afgebroken regels. |
+| `COINBASE_API_SECRET lijkt een PEM-sleutel maar kon niet worden gelezen` | Het `-----BEGIN`/`-----END`-blok is onvolledig, of de regeleindes staan niet als `\n` in `.env`. |
 | Netwerk- of DNS-fouten richting `api.coinbase.com` | Dit is een netwerk/sandbox-probleem, geen handelssignaal — de bot behandelt een onbekende Coinbase-status altijd als "fail-closed" (geen actie), nooit als impliciete toestemming. |
 | Bot doet niets in live mode | Waarschijnlijk ontbreekt een van de vereiste `ENABLE_*`-vlaggen of de bijpassende `*_ACK`. Dat is bedoeld gedrag: elke laag moet apart en expliciet open gezet worden. |
 | Tests falen direct na clonen | Controleer je Python-versie (`python3 --version` moet 3.12 zijn) en of `requirements-dev.txt` is geïnstalleerd. |
