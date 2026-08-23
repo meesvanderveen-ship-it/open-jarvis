@@ -1,0 +1,9 @@
+# Batch-bestanden moeten CRLF houden, ook in een ZIP-download van GitHub.
+# Met kale LF breken labels en goto in cmd.exe, en juist die gebruikt de
+# installer voor de Node-detectie. -text schakelt normalisatie uit, zodat de
+# CRLF-bytes exact zo in de repository en in elke export staan.
+*.bat -text
+*.cmd -text
+
+# Shell-scripts houden juist LF, ook als git op Windows draait.
+*.sh text eol=lf

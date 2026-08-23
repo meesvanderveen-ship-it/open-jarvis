@@ -88,8 +88,12 @@ def reconcile_entry_fill_to_position(
     no OrderStore/StateStore mutation is performed, so terminal evidence can be
     previewed without registering a position or changing the local order.
     """
+    # Buiten de if: het apply_local-pad hieronder rapporteert dezelfde teller.
+    # Stond deze toekenning binnen de if, dan liep de apply_local=True-aanroep
+    # op een UnboundLocalError in plaats van de bedoelde nette weigering.
+    store = order_store or OrderStore()
+
     if not apply_local:
-        store = order_store or OrderStore()
         snapshots = live_orders_snapshot or []
         actions: list[Dict[str, Any]] = []
         by_key: Dict[str, Dict[str, Any]] = {}
