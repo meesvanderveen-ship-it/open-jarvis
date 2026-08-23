@@ -1,4 +1,11 @@
 #!/usr/bin/env python3
+"""Handmatige replicatiecheck; stuurt een testenvelope naar de replica.
+
+Heette test_replication_publish.py in de projectroot. Die naam liet pytest
+het bestand verzamelen, waar het botste met de echte test met dezelfde naam
+in tests/. Dit is geen test maar een diagnosescript: het draait alleen via
+__main__ en bevat geen testfuncties.
+"""
 from __future__ import annotations
 
 from replication.publisher import ReplicaPublisher

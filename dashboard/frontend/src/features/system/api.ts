@@ -10,6 +10,7 @@ export type SystemState =
   | 'READY'
   | 'SETUP_REQUIRED'
   | 'CONFIGURATION_ERROR'
+  | 'VERIFICATION_UNAVAILABLE'
   | 'UNKNOWN'
 
 export type ProviderCheck = {

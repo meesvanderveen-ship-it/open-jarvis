@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import os
 import subprocess
+import importlib.util
 import sys
 import types
 from pathlib import Path
@@ -16,6 +17,21 @@ from bot.order_store import OrderStore
 
 
 ACK = "I_APPROVE_FULL_WORKFLOW_LIVE_MAX_3_ORDERS_MAX_20_USDC_BUY_AND_SELL_NO_MARKET_NO_REPLICATION"
+
+
+def _real_module_available(name: str) -> bool:
+    """True als de echte module geinstalleerd is.
+
+    De stubs in dit bestand bestaan zodat de test ook draait zonder de zware
+    optionele pakketten. De oude conditie keek naar sys.modules, maar dat is
+    bij het eerste gebruik altijd leeg -- ook als de echte module wel
+    geinstalleerd is. De stub verdrong dan de echte module voor de rest van
+    de sessie, waardoor latere tests over pytest.approx struikelden
+    ("module 'numpy' has no attribute 'isscalar'").
+    """
+    if name in sys.modules:
+        return True
+    return importlib.util.find_spec(name) is not None
 
 
 def _set_full_workflow_env(monkeypatch: pytest.MonkeyPatch, **overrides: str) -> None:
@@ -325,20 +341,20 @@ def test_operator_script_exact_ack_enables_full_workflow_caps_and_exits() -> Non
 
 
 def test_run_trader_loop_startup_diagnostic_exposes_full_workflow_bridge(monkeypatch: pytest.MonkeyPatch) -> None:
-    if "openai" not in sys.modules:
+    if not _real_module_available("openai"):
         openai_stub = types.ModuleType("openai")
         openai_stub.OpenAI = object
         sys.modules["openai"] = openai_stub
-    if "anthropic" not in sys.modules:
+    if not _real_module_available("anthropic"):
         anthropic_stub = types.ModuleType("anthropic")
         anthropic_stub.Anthropic = object
         sys.modules["anthropic"] = anthropic_stub
-    if "pandas" not in sys.modules:
+    if not _real_module_available("pandas"):
         pandas_stub = types.ModuleType("pandas")
         pandas_stub.DataFrame = object
         pandas_stub.Series = object
         sys.modules["pandas"] = pandas_stub
-    if "numpy" not in sys.modules:
+    if not _real_module_available("numpy"):
         numpy_stub = types.ModuleType("numpy")
         numpy_stub.nan = float("nan")
         numpy_stub.arange = lambda *args, **kwargs: []

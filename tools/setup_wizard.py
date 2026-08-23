@@ -38,6 +38,7 @@ from bot.credential_status import (
     OPENAI_KEY_ENV,
     READY,
     SETUP_REQUIRED,
+    VERIFICATION_UNAVAILABLE,
     STATUS_MISSING,
     STATUS_INVALID,
     STATUS_OK,
@@ -59,7 +60,27 @@ _STATE_MESSAGE = {
     READY: "JARVIS READY — configuratie compleet, de bot kan starten.",
     SETUP_REQUIRED: "SETUP REQUIRED — er ontbreken credentials.",
     CONFIGURATION_ERROR: "CONFIGURATION ERROR — credentials aanwezig maar niet bruikbaar.",
+    VERIFICATION_UNAVAILABLE: (
+        "API-VALIDATIE NIET UITGEVOERD — de credentials staan goed opgeslagen, "
+        "maar konden niet bij de API gecontroleerd worden."
+    ),
 }
+
+# Exit-codes, zodat scripts het onderscheid kunnen maken:
+#   0 = alles goed en geverifieerd
+#   1 = credentials ontbreken of zijn afgewezen
+#   2 = credentials ogen goed, maar de API was niet bereikbaar
+EXIT_OK = 0
+EXIT_INVALID = 1
+EXIT_UNVERIFIED = 2
+
+
+def exit_code_for(state: str) -> int:
+    if state == READY:
+        return EXIT_OK
+    if state == VERIFICATION_UNAVAILABLE:
+        return EXIT_UNVERIFIED
+    return EXIT_INVALID
 
 
 def render_checks(checks: list[CredentialCheck], stream=sys.stdout) -> None:
@@ -195,7 +216,7 @@ def run_check(*, online: bool, as_json: bool) -> int:
             print(f"\nWaarschuwing: {target} is leesbaar voor andere gebruikers.")
             print(f"Herstel met:  chmod 600 {target}")
 
-    return 0 if overall_state(checks) == READY else 1
+    return exit_code_for(overall_state(checks))
 
 
 def main(argv: Optional[list[str]] = None) -> int:

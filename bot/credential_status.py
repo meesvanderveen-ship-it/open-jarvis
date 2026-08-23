@@ -354,21 +354,75 @@ def verify_coinbase(
     )
 
 
+_HTTP_ERROR_PREFIX = "Coinbase HTTP error "
+
+
+def _http_status_from_client_error(text: str) -> Optional[int]:
+    """Haal de HTTP-status uit een CoinbaseClient-foutmelding.
+
+    Retourneert None als de fout geen antwoord van Coinbase was (netwerk,
+    proxy, timeout) -- dan valt er over de credentials niets te concluderen.
+    """
+    if _HTTP_ERROR_PREFIX not in text:
+        return None
+    remainder = text.split(_HTTP_ERROR_PREFIX, 1)[1]
+    digits = ""
+    for char in remainder:
+        if not char.isdigit():
+            break
+        digits += char
+    return int(digits) if digits else None
+
+
 def _coinbase_failure_from_exception(exc: Exception, offline: CredentialCheck) -> CredentialCheck:
-    """Vertaal een clientfout naar een oordeel, zonder secrets door te geven."""
+    """Vertaal een clientfout naar een oordeel, zonder secrets door te geven.
+
+    CoinbaseClient._request maakt zelf al het onderscheid dat hier telt:
+    een antwoord van Coinbase komt terug als "Coinbase HTTP error <status>",
+    en alles wat de server nooit bereikte als "Coinbase request failed".
+
+    Dat onderscheid moet hier gerespecteerd worden. Zoeken naar "403" in de
+    hele fouttekst is te grof: een bedrijfsproxy die de verbinding weigert
+    meldt ook 403, en dan zou een netwerkstoring als "sleutel afgewezen"
+    gerapporteerd worden -- de gebruiker gaat dan een prima sleutel vervangen.
+    """
     text = str(exc)
-    unauthorized = any(marker in text for marker in ("401", "403", "Unauthorized", "invalid_token"))
+    status = _http_status_from_client_error(text)
+    unauthorized = status in {401, 403}
 
     if unauthorized:
+        detail = (
+            "Coinbase wees de credentials af. Controleer of de sleutel nog actief "
+            "is en of 'View'-rechten aanstaan voor deze API-key."
+        )
+        # Coinbase documenteert Ed25519 als voorkeur voor CDP in het algemeen,
+        # maar noemt bij Advanced Trade dat daar ECDSA gebruikt moet worden.
+        # Wordt een Ed25519-sleutel hier afgewezen, dan is dat de eerste
+        # verdenking -- en een ECDSA-sleutel werkt in deze bot net zo goed.
+        if offline.facts.get("jwt_algorithm") == "EdDSA":
+            detail += (
+                " Deze sleutel is van het type Ed25519. Coinbase Advanced Trade "
+                "accepteert mogelijk alleen ECDSA; maak in dat geval een nieuwe "
+                "API-key aan van het type ECDSA en draai de setup opnieuw."
+            )
         return CredentialCheck(
             provider="coinbase",
             status=STATUS_INVALID,
             summary="Coinbase authenticatie mislukt.",
-            detail=(
-                "Coinbase wees de credentials af. Controleer of de sleutel nog actief "
-                "is en of 'View'-rechten aanstaan voor deze API-key."
-            ),
+            detail=detail,
             facts=offline.facts,
+        )
+
+    if status is not None:
+        return CredentialCheck(
+            provider="coinbase",
+            status=STATUS_UNKNOWN,
+            summary="Coinbase gaf een onverwacht antwoord.",
+            detail=(
+                f"HTTP {status}. De credentials zijn niet afgewezen, maar ook niet "
+                "bevestigd. Dit wijst op een probleem aan de kant van Coinbase."
+            ),
+            facts={**offline.facts, "http_status": status},
         )
 
     return CredentialCheck(
@@ -376,8 +430,9 @@ def _coinbase_failure_from_exception(exc: Exception, offline: CredentialCheck) -
         status=STATUS_UNKNOWN,
         summary="Coinbase niet bereikbaar.",
         detail=(
-            "De credentials zijn geldig van vorm maar konden niet worden geverifieerd: "
-            f"{type(exc).__name__}. Waarschijnlijk een netwerkprobleem."
+            "De credentials zijn geldig van vorm maar konden niet worden geverifieerd; "
+            "het verzoek bereikte Coinbase niet. Dat wijst op een netwerk-, proxy- of "
+            "internetprobleem, niet op een verkeerde sleutel."
         ),
         facts=offline.facts,
     )
@@ -390,14 +445,26 @@ def _coinbase_failure_from_exception(exc: Exception, offline: CredentialCheck) -
 READY = "READY"
 SETUP_REQUIRED = "SETUP_REQUIRED"
 CONFIGURATION_ERROR = "CONFIGURATION_ERROR"
+VERIFICATION_UNAVAILABLE = "VERIFICATION_UNAVAILABLE"
 
 
 def overall_state(checks: list[CredentialCheck]) -> str:
-    """Vertaal losse controles naar één systeemtoestand."""
+    """Vertaal losse controles naar één systeemtoestand.
+
+    Volgorde van ernst: afgewezen credentials wegen zwaarder dan ontbrekende,
+    en die weer zwaarder dan een controle die niet uitgevoerd kon worden.
+
+    Een niet-uitgevoerde controle mag nooit als READY doorgaan. Anders zou een
+    netwerkstoring tijdens de online verificatie een succesmelding opleveren
+    terwijl niemand weet of de sleutels werken. Offline levert geen enkele
+    controle deze toestand op, dus daar verandert niets.
+    """
     if any(check.status == STATUS_INVALID for check in checks):
         return CONFIGURATION_ERROR
     if any(check.status == STATUS_MISSING for check in checks):
         return SETUP_REQUIRED
+    if any(check.status == STATUS_UNKNOWN for check in checks):
+        return VERIFICATION_UNAVAILABLE
     return READY
 
 

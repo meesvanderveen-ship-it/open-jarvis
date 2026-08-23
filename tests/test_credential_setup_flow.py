@@ -250,7 +250,7 @@ def test_coinbase_authentication_success_uses_read_only_call():
 
 
 def test_coinbase_rejected_credentials_are_reported_as_invalid():
-    client = _FakeCoinbaseClient(error=RuntimeError("Coinbase request failed: 401 Unauthorized"))
+    client = _FakeCoinbaseClient(error=RuntimeError('Coinbase HTTP error 401: {"message":"Unauthorized"}'))
     check = verify_coinbase(valid_env(), client=client)
 
     assert check.status == STATUS_INVALID
@@ -262,7 +262,7 @@ def test_coinbase_network_failure_is_not_blamed_on_credentials():
     check = verify_coinbase(valid_env(), client=client)
 
     assert check.status == STATUS_UNKNOWN
-    assert "netwerkprobleem" in check.detail
+    assert "netwerk" in check.detail.lower()
 
 
 # ------------------------------------------------------- overall state
@@ -541,3 +541,109 @@ def test_setup_wizard_cli_runs_and_emits_a_known_state(tmp_path):
     payload = json.loads(result.stdout)
     assert payload["state"] in {READY, SETUP_REQUIRED, CONFIGURATION_ERROR}
     assert (result.returncode == 0) == (payload["state"] == READY)
+
+
+# ------------------------------- niet-uitgevoerde verificatie
+
+
+def test_unverifiable_check_never_reports_ready():
+    """Een netwerkstoring mag geen valse PASS opleveren.
+
+    verify_* geeft STATUS_UNKNOWN als de API onbereikbaar was. Zou dat als
+    READY doorgaan, dan zou de installer 'gelukt' melden zonder dat iemand
+    weet of de sleutels werken.
+    """
+    from bot.credential_status import VERIFICATION_UNAVAILABLE
+
+    unreachable = verify_openai(
+        {"OPENAI_API_KEY": FAKE_OPENAI_KEY}, session=_Session(raises=OSError("geen netwerk"))
+    )
+    assert unreachable.status == STATUS_UNKNOWN
+
+    checks = [unreachable, check_coinbase(valid_env())]
+    assert overall_state(checks) == VERIFICATION_UNAVAILABLE
+    assert overall_state(checks) != READY
+
+
+def test_rejected_credentials_outrank_an_unreachable_api():
+    """Een afgewezen sleutel is ernstiger dan een niet-bereikbare API."""
+    rejected = verify_openai({"OPENAI_API_KEY": FAKE_OPENAI_KEY}, session=_Session(status_code=401))
+    unreachable = verify_coinbase(valid_env(), client=_FakeCoinbaseClient(error=OSError("down")))
+
+    assert overall_state([rejected, unreachable]) == CONFIGURATION_ERROR
+
+
+def test_offline_checks_never_produce_the_unverified_state():
+    """Offline levert alleen ok/missing/invalid op, dus dit verandert niets."""
+    from bot.credential_status import VERIFICATION_UNAVAILABLE
+
+    for env in ({}, valid_env(), {"OPENAI_API_KEY": "your_openai_api_key_here"}):
+        state = overall_state([check_openai(env), check_coinbase(env)])
+        assert state != VERIFICATION_UNAVAILABLE
+
+
+def test_wizard_exit_codes_distinguish_rejected_from_unreachable():
+    """De installer leunt op deze codes om geen valse 'GELUKT' te tonen."""
+    from bot.credential_status import VERIFICATION_UNAVAILABLE
+    from tools.setup_wizard import EXIT_INVALID, EXIT_OK, EXIT_UNVERIFIED, exit_code_for
+
+    assert exit_code_for(READY) == EXIT_OK
+    assert exit_code_for(VERIFICATION_UNAVAILABLE) == EXIT_UNVERIFIED
+    assert exit_code_for(CONFIGURATION_ERROR) == EXIT_INVALID
+    assert exit_code_for(SETUP_REQUIRED) == EXIT_INVALID
+    assert EXIT_OK != EXIT_UNVERIFIED != EXIT_INVALID
+
+
+def test_rejected_ed25519_key_suggests_an_ecdsa_key():
+    """Coinbase Advanced Trade accepteert mogelijk alleen ECDSA.
+
+    Wordt een Ed25519-sleutel afgewezen, dan moet de melding dat noemen --
+    anders zoekt de gebruiker in de verkeerde richting.
+    """
+    client = _FakeCoinbaseClient(error=RuntimeError("Coinbase HTTP error 401: unauthorized"))
+    check = verify_coinbase(valid_env(ed25519_base64()), client=client)
+
+    assert check.status == STATUS_INVALID
+    assert "Ed25519" in check.detail
+    assert "ECDSA" in check.detail
+
+
+def test_rejected_ecdsa_key_does_not_mention_the_key_type():
+    """Bij een ECDSA-sleutel is het sleuteltype juist niet de verdachte."""
+    client = _FakeCoinbaseClient(error=RuntimeError("Coinbase HTTP error 401: unauthorized"))
+    check = verify_coinbase(valid_env(ecdsa_pem()), client=client)
+
+    assert check.status == STATUS_INVALID
+    assert "Ed25519" not in check.detail
+
+
+def test_proxy_403_is_not_mistaken_for_rejected_credentials():
+    """Een blokkerende proxy meldt ook 403; dat is geen sleutelprobleem.
+
+    De oude classificatie zocht "403" in de hele fouttekst en rapporteerde
+    dan CONFIGURATION ERROR. De gebruiker zou een prima sleutel vervangen.
+    """
+    proxy_error = RuntimeError(
+        "Coinbase request failed: ProxyError('Cannot connect to proxy.', "
+        "OSError('Tunnel connection failed: 403 Forbidden'))"
+    )
+    check = verify_coinbase(valid_env(), client=_FakeCoinbaseClient(error=proxy_error))
+
+    assert check.status == STATUS_UNKNOWN
+    assert "netwerk" in check.detail.lower()
+
+
+def test_real_http_401_from_coinbase_is_reported_as_invalid():
+    error = RuntimeError('Coinbase HTTP error 401: {"message":"Unauthorized"}')
+    check = verify_coinbase(valid_env(), client=_FakeCoinbaseClient(error=error))
+
+    assert check.status == STATUS_INVALID
+    assert "mislukt" in check.summary
+
+
+def test_coinbase_server_error_is_not_blamed_on_the_key():
+    error = RuntimeError("Coinbase HTTP error 503: service unavailable")
+    check = verify_coinbase(valid_env(), client=_FakeCoinbaseClient(error=error))
+
+    assert check.status == STATUS_UNKNOWN
+    assert check.facts["http_status"] == 503

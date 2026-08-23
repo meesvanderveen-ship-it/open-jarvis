@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import sys
 import types
 from decimal import Decimal
@@ -9,7 +10,22 @@ from types import SimpleNamespace
 # The sandbox used for patch validation does not install paid-provider SDKs.
 # StrategyEngine imports bot.llm_clients at module import time, so provide tiny
 # inert stubs. The production server .venv can still use the real packages.
-if "openai" not in sys.modules:
+def _real_module_available(name: str) -> bool:
+    """True als de echte module geinstalleerd is.
+
+    De stubs in dit bestand bestaan zodat de test ook draait zonder de zware
+    optionele pakketten. De oude conditie keek naar sys.modules, maar dat is
+    bij het eerste gebruik altijd leeg -- ook als de echte module wel
+    geinstalleerd is. De stub verdrong dan de echte module voor de rest van
+    de sessie, waardoor latere tests over pytest.approx struikelden
+    ("module 'numpy' has no attribute 'isscalar'").
+    """
+    if name in sys.modules:
+        return True
+    return importlib.util.find_spec(name) is not None
+
+
+if not _real_module_available("openai"):
     openai_stub = types.ModuleType("openai")
 
     class OpenAI:  # pragma: no cover - import shim only
@@ -19,7 +35,7 @@ if "openai" not in sys.modules:
     openai_stub.OpenAI = OpenAI
     sys.modules["openai"] = openai_stub
 
-if "anthropic" not in sys.modules:
+if not _real_module_available("anthropic"):
     anthropic_stub = types.ModuleType("anthropic")
 
     class Anthropic:  # pragma: no cover - import shim only
@@ -29,7 +45,7 @@ if "anthropic" not in sys.modules:
     anthropic_stub.Anthropic = Anthropic
     sys.modules["anthropic"] = anthropic_stub
 
-if "pandas" not in sys.modules:
+if not _real_module_available("pandas"):
     pandas_stub = types.ModuleType("pandas")
     pandas_stub.DataFrame = object
     pandas_stub.Series = object
@@ -37,7 +53,7 @@ if "pandas" not in sys.modules:
     pandas_stub.isna = lambda value: value is None
     sys.modules["pandas"] = pandas_stub
 
-if "numpy" not in sys.modules:
+if not _real_module_available("numpy"):
     numpy_stub = types.ModuleType("numpy")
     numpy_stub.nan = float("nan")
     numpy_stub.arange = lambda *args, **kwargs: []

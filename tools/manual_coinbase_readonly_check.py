@@ -1,3 +1,10 @@
+"""Handmatige read-only Coinbase-check: accounts, product en bid/ask.
+
+Heette test_coinbase.py in de projectroot, waardoor pytest het verzamelde en
+bij collectie load_dotenv() uitvoerde -- dat vervuilde de omgeving van de
+echte tests. Plaatst geen orders; de executor-regel staat bewust uitgecommend.
+"""
+
 from decimal import Decimal
 from dotenv import load_dotenv
 

@@ -1,5 +1,5 @@
 @echo off
-setlocal
+setlocal enabledelayedexpansion
 chcp 65001 >nul 2>&1
 cd /d "%~dp0"
 
@@ -17,13 +17,22 @@ if not exist ".venv\Scripts\python.exe" (
 )
 set "VENV_PY=%CD%\.venv\Scripts\python.exe"
 
-REM ---------------------------------------------------------------
-REM Eerst controleren of de sleutels kloppen -- anders start er niets
-REM ---------------------------------------------------------------
+if not exist "dashboard\frontend\dist\index.html" (
+    echo   Het dashboard is nog niet gebouwd.
+    echo   Dubbelklik eerst op INSTALLEREN-WINDOWS.bat
+    echo.
+    pause
+    exit /b 1
+)
+
+REM ===============================================================
+REM Preflight: geen enkel proces starten met kapotte credentials
+REM ===============================================================
 echo Sleutels controleren...
 echo.
 "%VENV_PY%" -m tools.setup_wizard --check
-if errorlevel 1 (
+set "PREFLIGHT=%errorlevel%"
+if not "%PREFLIGHT%"=="0" (
     echo.
     echo ------------------------------------------------------------
     echo   JARVIS is nog niet startklaar.
@@ -42,23 +51,52 @@ echo   Alles staat goed. JARVIS start nu.
 echo.
 echo   Er openen twee zwarte vensters. Laat ze allebei open staan;
 echo   sluiten betekent stoppen.
-echo.
-echo   Het dashboard komt vanzelf in je browser op:
-echo     http://127.0.0.1:8000
 echo ------------------------------------------------------------
 echo.
 
+REM ===============================================================
 REM Beide processen krijgen een eigen venster. Hier staat bewust het
-REM relatieve pad .venv\Scripts\python.exe: dat bevat zelf geen spaties, ook
-REM niet als de projectmap in bijvoorbeeld "Mijn Documenten" staat, zodat de
-REM aanhalingstekens van cmd /k niet in de knoop raken.
+REM relatieve pad .venv\Scripts\python.exe: dat bevat zelf geen spaties,
+REM ook niet als de projectmap in bijvoorbeeld "Mijn Documenten" staat.
+REM ===============================================================
+echo Dashboard starten...
 start "JARVIS dashboard" cmd /k ".venv\Scripts\python.exe -m dashboard.backend.run"
+
+echo Bot starten...
 start "JARVIS bot" cmd /k ".venv\Scripts\python.exe run_trader_loop.py"
 
-REM Even wachten tot de webserver luistert, dan de browser openen
-timeout /t 6 /nobreak >nul
-start "" http://127.0.0.1:8000
+REM ===============================================================
+REM Wachten tot de webserver echt antwoordt. Een vaste wachttijd is
+REM onbetrouwbaar: op een trage pc is 6 seconden te kort, en dan opent
+REM de browser op een foutpagina.
+REM ===============================================================
+echo.
+echo Wachten tot het dashboard antwoordt...
+set "GEREED="
+for /l %%i in (1,1,30) do (
+    if not defined GEREED (
+        "%VENV_PY%" -c "import urllib.request,sys; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=2); sys.exit(0)" >nul 2>&1
+        if !errorlevel! equ 0 (
+            set "GEREED=1"
+        ) else (
+            timeout /t 1 /nobreak >nul
+        )
+    )
+)
 
-echo Klaar. Dit venster mag je sluiten.
+echo.
+if defined GEREED (
+    echo   Dashboard is bereikbaar. De browser wordt geopend.
+    start "" http://127.0.0.1:8000
+) else (
+    echo   Het dashboard antwoordde niet binnen 30 seconden.
+    echo.
+    echo   Kijk in het venster "JARVIS dashboard" wat daar staat.
+    echo   Een veelvoorkomende oorzaak is dat poort 8000 al bezet is.
+    echo   Je kunt zelf proberen:  http://127.0.0.1:8000
+)
+
+echo.
+echo Dit venster mag je sluiten. De twee andere niet.
 echo.
 pause

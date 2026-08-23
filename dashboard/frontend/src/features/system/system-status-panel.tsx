@@ -45,6 +45,14 @@ const STATE_PRESENTATION: Record<
     blurb: 'Credentials zijn aanwezig maar niet bruikbaar. Zie de details hieronder.',
     Icon: AlertTriangle,
   },
+  VERIFICATION_UNAVAILABLE: {
+    tone: 'warn',
+    label: 'NIET GEVERIFIEERD',
+    blurb:
+      'De sleutels zijn opgeslagen, maar konden niet bij OpenAI of Coinbase ' +
+      'gecontroleerd worden. Dat wijst op een netwerkprobleem.',
+    Icon: CircleHelp,
+  },
   UNKNOWN: {
     tone: 'neutral',
     label: 'STATUS ONBEKEND',
@@ -169,7 +177,7 @@ export function SystemStatusPanel() {
         </div>
       ) : null}
 
-      {state !== 'READY' ? (
+      {state !== 'READY' && state !== 'VERIFICATION_UNAVAILABLE' ? (
         <p className='text-muted-foreground relative mt-4 text-xs'>
           Stel de credentials in met{' '}
           <code className='bg-muted rounded px-1 py-0.5 font-mono'>
