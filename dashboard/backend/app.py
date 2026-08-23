@@ -32,6 +32,7 @@ from dashboard.backend.routers import (
     reports,
     risk,
     run_summary,
+    setup_status,
     shadow_outcomes,
     status,
     trace,
@@ -44,6 +45,7 @@ app.add_middleware(RedactJSONMiddleware)
 
 app.include_router(health.router)
 app.include_router(status.router)
+app.include_router(setup_status.router)
 app.include_router(positions.router)
 app.include_router(orders.router)
 app.include_router(risk.router)

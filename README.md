@@ -98,11 +98,17 @@ cd AI-TRADINGBOT
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env
-# edit .env: fill in your own API keys; leave EXECUTION_MODE=paper
-# and every live-order/live-exit/market-order flag at false until
-# you have read the safety docs in docs/ and understand the gates.
+python -m tools.setup_wizard          # vraagt om je API keys, schrijft .env (0600)
+python -m tools.setup_wizard --check --online   # verifieert ze read-only
 ```
+
+De wizard maakt `.env` aan vanaf `.env.example` en vult alleen de
+credentials in. `EXECUTION_MODE` blijft op `paper` en elke
+live-order/live-exit/market-order vlag blijft `false` tot je de
+veiligheidsdocumenten in `docs/` hebt gelezen en de gates begrijpt.
+
+Je kunt `.env` ook nog steeds met de hand bewerken (`cp .env.example .env`);
+de wizard is een hulpmiddel, geen vereiste.
 
 ## Stap-voor-stap handleiding
 
@@ -162,12 +168,40 @@ Python-versie betekenen dat je Python 3.12 moet installeren (zie
 
 ### Stap 4 — je eigen configuratiebestand aanmaken
 
+De begeleide weg:
+
 ```bash
-cp .env.example .env
+python -m tools.setup_wizard
 ```
 
-Open `.env` nu in een editor (bijv. `nano .env` of VS Code) en vul **alleen**
-de velden in die je nodig hebt:
+De wizard maakt `.env` aan vanaf `.env.example`, vraagt om je OpenAI- en
+Coinbase-credentials, slaat ze op met rechten `0600` (alleen jij kunt ze
+lezen) en controleert daarna meteen of ze bruikbaar zijn. Invoer wordt niet
+op het scherm getoond en nergens gelogd. Enter indrukken laat een bestaande
+waarde ongemoeid.
+
+Voor Coinbase heb je het JSON-bestand nodig dat je downloadt bij het aanmaken
+van een CDP API-key:
+
+- veld `name` → **Coinbase API Key**
+- veld `privateKey` → **Coinbase API Secret**
+
+Beide sleuteltypes die Coinbase uitgeeft werken: ECDSA (een PEM-blok) en
+Ed25519 (een base64-tekst).
+
+Status opvragen zonder iets te wijzigen:
+
+```bash
+python -m tools.setup_wizard --check            # alleen vorm/aanwezigheid
+python -m tools.setup_wizard --check --online   # ook echt tegen de API's
+```
+
+De `--online`-variant doet uitsluitend read-only aanroepen: `GET /v1/models`
+bij OpenAI en de accountlijst bij Coinbase. Er wordt nooit een order geplaatst.
+
+Wil je het liever met de hand doen, dan kan dat nog steeds: `cp .env.example .env`
+en het bestand openen in een editor. Vul **alleen** de velden in die je nodig
+hebt:
 
 - `COINBASE_API_KEY` en `COINBASE_API_SECRET` — laat deze gerust leeg/placeholder
   zolang je alleen in paper mode test. Je hebt ze pas nodig zodra je echt
@@ -262,6 +296,7 @@ Stap 6 vóór en na elke wijziging om te controleren wat er feitelijk gebeurt.
 |---|---|
 | `ModuleNotFoundError` bij het starten | Je hebt de venv niet geactiveerd (Stap 2) of `pip install` niet (opnieuw) gedraaid (Stap 3). |
 | Geen LLM-output / lege analyses | Geen geldige `OPENAI_API_KEY`/`ANTHROPIC_API_KEY` in `.env`. |
+| Bot stopt met `SETUP REQUIRED` of `CONFIGURATION ERROR` | De credential-preflight blokkeert de start. De melding noemt precies welke waarde ontbreekt of onbruikbaar is; herstel met `python -m tools.setup_wizard`. |
 | `COINBASE_API_SECRET heeft een onbekend formaat` | De waarde is geen PEM-blok en geen base64-sleutel. Neem het veld `privateKey` uit het Coinbase-JSON-bestand letterlijk over, zonder aanhalingstekens en zonder afgebroken regels. |
 | `COINBASE_API_SECRET lijkt een PEM-sleutel maar kon niet worden gelezen` | Het `-----BEGIN`/`-----END`-blok is onvolledig, of de regeleindes staan niet als `\n` in `.env`. |
 | Netwerk- of DNS-fouten richting `api.coinbase.com` | Dit is een netwerk/sandbox-probleem, geen handelssignaal — de bot behandelt een onbekende Coinbase-status altijd als "fail-closed" (geen actie), nooit als impliciete toestemming. |

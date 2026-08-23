@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional
 
 from bot.config import BotConfig, configured_ticker_universe, effective_phase_c_allowed_tickers
 from bot.atomic_io import process_lock
+from bot.credential_status import READY, collect_checks, overall_state
 from bot.phase_c_live_guard import LIVE_ENTRY_GUARD_VERSION, LIVE_ENTRY_REQUIRED_GATES
 from bot.pre_live_startup_gate import assess_pre_live_startup_gate, enforce_pre_live_startup_gate
 from bot.product_rules import PRODUCT_RULE_NORMALIZER_VERSION
@@ -1217,8 +1218,47 @@ def _run_guarded_cycle(
     return True
 
 
+def _preflight_credentials(*, blocking: bool = True) -> str:
+    """Controleer of OpenAI/Coinbase bruikbaar geconfigureerd zijn.
+
+    Draait vóór BotConfig(), zodat een ontbrekende sleutel een leesbare
+    instructie oplevert in plaats van een dataclass-traceback, en zodat een
+    onbruikbare Coinbase-sleutel niet pas uren later midden in een cyclus
+    opduikt. Alleen offline controles: geen netwerk, geen API-kosten.
+
+    `blocking=False` rapporteert wel maar stopt niet. Dat is de modus voor
+    `--startup-diagnostic`: juist wanneer de configuratie stuk is wil je die
+    diagnose kunnen draaien, dus die mag er niet zelf op stuklopen.
+
+    De credentials komen uit .env: `bot.config` laadt dat bestand bij import,
+    dus vóór deze functie draait. Retourneert de vastgestelde toestand.
+    """
+    checks = collect_checks(online=False)
+    state = overall_state(checks)
+    if state == READY:
+        for check in checks:
+            logging.info("Credentials | %s: %s", check.provider, check.summary)
+        return state
+
+    logging.error("=" * 68)
+    logging.error("%s — de bot start niet.", state.replace("_", " "))
+    for check in checks:
+        if check.ok:
+            continue
+        logging.error("  %s: %s", check.provider, check.summary)
+        if check.detail:
+            logging.error("      %s", check.detail)
+    logging.error("")
+    logging.error("  Stel de credentials in met:  python -m tools.setup_wizard")
+    logging.error("=" * 68)
+    if blocking:
+        raise SystemExit(4)
+    return state
+
+
 def main() -> None:
     startup_diagnostic_only = "--startup-diagnostic" in sys.argv[1:]
+    _preflight_credentials(blocking=not startup_diagnostic_only)
     cfg = BotConfig()
     cfg.validate()
 

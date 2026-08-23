@@ -1,5 +1,7 @@
 # Logs
-logs
+# Verankerd op deze map: een kaal `logs` matcht ook
+# src/features/logs/, waardoor die broncode uit de repository verdween.
+/logs
 *.log
 npm-debug.log*
 yarn-debug.log*

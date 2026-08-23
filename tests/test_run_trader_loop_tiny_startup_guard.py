@@ -10,6 +10,35 @@ import run_trader_loop
 from bot.phase_live_tiny_btc_preflight import ACTUAL_SUBMIT_ACK
 
 
+def _satisfy_credential_preflight(monkeypatch) -> None:
+    """Geef main() bruikbare credentials zodat de preflight doorlaat.
+
+    Deze tests gaan over de tiny-runtime guard, niet over credentials; zonder
+    dit zou de preflight (exit 4) afgaan voordat de guard (exit 2) aan bod
+    komt. De credential-preflight zelf wordt gedekt door
+    tests/test_credential_setup_flow.py. Sleutel wordt hier gegenereerd.
+    """
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+
+    pem = (
+        ec.generate_private_key(ec.SECP256R1())
+        .private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.TraditionalOpenSSL,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+        .decode()
+    )
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-fake-key-for-guard-tests-0000")
+    monkeypatch.setenv(
+        "COINBASE_API_KEY",
+        "organizations/00000000-0000-0000-0000-000000000000"
+        "/apiKeys/11111111-1111-1111-1111-111111111111",
+    )
+    monkeypatch.setenv("COINBASE_API_SECRET", pem)
+
+
 def _cfg(**overrides):
     data = {
         "log_level": "INFO",
@@ -44,6 +73,7 @@ def test_runtime_startup_guard_passes_btc_only_wrapper(monkeypatch) -> None:
 
 
 def test_tiny_ack_non_btc_tickers_hard_fails_before_engine_cycle_or_state(monkeypatch, tmp_path) -> None:
+    _satisfy_credential_preflight(monkeypatch)
     calls = {"engine": 0, "cycle": 0, "publisher": 0}
     state_file = tmp_path / "positions.json"
     before = state_file.read_bytes() if state_file.exists() else b""

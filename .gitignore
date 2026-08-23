@@ -1,11 +1,17 @@
 # Runtime credentials and local operational state
+#
+# De mappen hieronder staan met een leidende slash zodat ze alleen de
+# runtime-uitvoer in de projectroot negeren. Zonder die slash matcht git op
+# elke diepte, waardoor eerder onbedoeld frontend-broncode werd genegeerd
+# (dashboard/frontend/src/features/reports, .../features/logs en
+# .../components/layout/data verdwenen daardoor uit de repository).
 .env
 .env.*
 !.env.example
-state/
-logs/
-reports/
-data/
+/state/
+/logs/
+/reports/
+/data/
 
 # Secrets / keys, defense-in-depth beyond the .env rules above
 *.pem
