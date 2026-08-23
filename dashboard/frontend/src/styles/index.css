@@ -85,3 +85,118 @@
     height: 0;
   }
 }
+
+/* ==========================================================================
+   JARVIS-laag (Fase 2)
+
+   Puur visueel. Deze regels voegen accentkleuren, gloed en animaties toe
+   bovenop de bestaande shadcn-tokens; ze vervangen er geen enkele, zodat
+   alle bestaande pagina's ongewijzigd blijven werken.
+   ========================================================================== */
+
+@layer base {
+  :root {
+    /* Statuskleuren voor de systeemtoestanden READY / SETUP / ERROR. */
+    --jarvis-accent: oklch(0.72 0.15 210);
+    --jarvis-ready: oklch(0.72 0.17 155);
+    --jarvis-warn: oklch(0.78 0.16 75);
+    --jarvis-error: oklch(0.64 0.22 25);
+    --jarvis-grid: oklch(0.72 0.15 210 / 0.07);
+  }
+
+  .dark {
+    --jarvis-accent: oklch(0.78 0.14 205);
+    --jarvis-ready: oklch(0.78 0.16 158);
+    --jarvis-warn: oklch(0.83 0.15 80);
+    --jarvis-error: oklch(0.7 0.2 25);
+    --jarvis-grid: oklch(0.78 0.14 205 / 0.1);
+  }
+}
+
+@layer components {
+  /* Zwak oplichtend paneel met een fijne rasterachtergrond. */
+  .jarvis-panel {
+    position: relative;
+    overflow: hidden;
+    border: 1px solid color-mix(in oklch, var(--jarvis-accent) 22%, transparent);
+    background:
+      linear-gradient(
+        135deg,
+        color-mix(in oklch, var(--jarvis-accent) 6%, transparent),
+        transparent 55%
+      ),
+      var(--card);
+  }
+
+  .jarvis-panel::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background-image:
+      linear-gradient(var(--jarvis-grid) 1px, transparent 1px),
+      linear-gradient(90deg, var(--jarvis-grid) 1px, transparent 1px);
+    background-size: 32px 32px;
+    mask-image: radial-gradient(ellipse at top left, black, transparent 75%);
+  }
+
+  /* Pulserende statusindicator. */
+  .jarvis-pulse {
+    position: relative;
+    display: inline-flex;
+    height: 0.625rem;
+    width: 0.625rem;
+    border-radius: 9999px;
+    background: var(--jarvis-tone, var(--jarvis-accent));
+  }
+
+  .jarvis-pulse::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    background: inherit;
+    animation: jarvis-ping 2s cubic-bezier(0, 0, 0.2, 1) infinite;
+  }
+
+  .jarvis-glow {
+    box-shadow: 0 0 0 1px color-mix(in oklch, var(--jarvis-tone, var(--jarvis-accent)) 30%, transparent),
+      0 0 24px -6px color-mix(in oklch, var(--jarvis-tone, var(--jarvis-accent)) 55%, transparent);
+  }
+
+  /* Zachte intro voor panelen die na een fetch verschijnen. */
+  .jarvis-rise {
+    animation: jarvis-rise 0.45s ease-out both;
+  }
+}
+
+@keyframes jarvis-ping {
+  0% {
+    opacity: 0.65;
+    transform: scale(1);
+  }
+  70%,
+  100% {
+    opacity: 0;
+    transform: scale(2.4);
+  }
+}
+
+@keyframes jarvis-rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* Respecteer de systeeminstelling voor bewegingsreductie. */
+@media (prefers-reduced-motion: reduce) {
+  .jarvis-pulse::after,
+  .jarvis-rise {
+    animation: none;
+  }
+}

@@ -15,6 +15,7 @@ import { Search } from '@/components/search'
 import { StatusBadge, type StatusTone } from '@/components/status-badge'
 import { ThemeSwitch } from '@/components/theme-switch'
 import { useRiskGuards } from '@/features/risk/api'
+import { SystemStatusPanel } from '@/features/system/system-status-panel'
 import { useLiveStatus, usePipelineHealth, useRunSummary } from './api'
 
 const DECISION_TONE: Record<string, StatusTone> = {
@@ -88,6 +89,10 @@ export function Overview() {
       </Header>
 
       <Main>
+        {/* Systeemstatus staat bewust bovenaan: wie het dashboard opent moet
+            meteen zien of JARVIS kan draaien, en zo niet, waarom niet. */}
+        <SystemStatusPanel />
+
         <div className='mb-4 flex flex-wrap items-center justify-between gap-2'>
           <div>
             <h1 className='text-2xl font-bold tracking-tight'>
