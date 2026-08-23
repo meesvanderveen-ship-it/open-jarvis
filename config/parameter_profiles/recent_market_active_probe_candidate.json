@@ -1,0 +1,85 @@
+{
+  "profile_name": "recent_market_active_probe_candidate_v1",
+  "profile_version": 1,
+  "generated_at": "2026-07-02T06:50:00Z",
+  "source": "10_phase_root_cause_investigation_2026-07-02",
+  "description": "Recalibration of the small-probe promotion gate (bot/strategy_engine.py:_maybe_promote_wait_to_small_probe), the only code path that can convert a judge 'wait' on a valid prepare_* plan into approve_trade without a perfect trigger fill. A 72h audit (8 tickers, all +1.8%..+8.3%) found this path fired 0/64 times because two of its gates were miscalibrated against the real analyst-score distribution, not because the market lacked opportunities. See reports/audits/entry-funnel-72h-latest.md, reports/audits/missed-opportunities-72h-latest.md, reports/audits/recent-market-move-latest.md, reports/backtests/recent-market-parameter-sweetspot-latest.md.",
+  "safe_to_test": true,
+  "already_applied_as_code_default": true,
+  "rollback_profile": "state/approved_parameter_profile.json",
+  "rollback_instructions": "Set every parameter below back to its 'current' (pre-fix) value via the approved_parameter_profile route, or revert bot/config.py / bot/strategy_engine.py to before commit tagged 2026-07-02 small-probe recalibration.",
+
+  "parameter_changes": {
+    "SMALL_PROBE_MAX_BEAR_BULL_GAP": {
+      "current": "4 (as bear_score >= max(40, bull_score-4), i.e. an absolute veto)",
+      "proposed": "32",
+      "direction": "loosen",
+      "reason": "The bear-case analyst prompt is structurally more pessimistic than the bull-case prompt. Across 64 valid prepare_* plans in the 72h window (market +1.8%..+8.3%), bear_score exceeded bull_score in 64/64 cases (median gap +29, min gap +1, max +48) -- the old absolute veto vetoed literally every candidate regardless of setup quality.",
+      "evidence": "reports/audits/entry-funnel-72h-latest.json:reject_reasons_at_judge; scratch simulation in reports/backtests/recent-market-parameter-sweetspot-latest.json profile A_current_pre_fix promoted_count=0/64",
+      "expected_effect": "Only vetoes candidates where the bear case dominates the bull case by a wide (top-quartile) margin, instead of vetoing on any nonzero bear-lean.",
+      "risk": "LOW-MEDIUM: widens the promotion aperture; bounded by the still-active per-branch quality thresholds below and the small fixed probe size (20-25 USDC).",
+      "rollback_value": "4"
+    },
+    "SMALL_PROBE_REQUIRE_HTF_BOTH_TIMEFRAMES": {
+      "current": "false (OR semantics: either 4h EMA50<EMA200 OR 1h EMA20<EMA50 blocks)",
+      "proposed": "true",
+      "direction": "tighten_semantics_but_unblocks_lagging_only_cases",
+      "reason": "46/64 valid candidates were blocked purely by the LAGGING 4h EMA50/EMA200 cross (normal for the first 1-2 weeks of a fresh reversal) while the FASTER 1h structure was already bullish. 0/64 were blocked by the 1h leg alone. Requiring both timeframes to agree removes the lag-only false negative while still blocking the 17/64 cases where both legs genuinely agree the trend is down.",
+      "evidence": "reports/audits/entry-funnel-72h-latest.json; tools/find_recent_market_parameter_sweetspot.py bearish_htf breakdown",
+      "expected_effect": "Stops vetoing candidates solely because a slow-moving 4h moving average hasn't caught up yet.",
+      "risk": "LOW: strictly removes a stale-indicator false negative; does not weaken the check for genuinely bearish setups (both legs still block).",
+      "rollback_value": "false"
+    },
+    "SMALL_PROBE_TC_SYNTH_MIN": {"current": "78", "proposed": "68", "direction": "loosen", "reason": "Live synth_confidence distribution on valid prepare_breakout plans: p75=73, max=79 -- the old 78 threshold admitted almost nothing.", "risk": "LOW", "rollback_value": "78"},
+    "SMALL_PROBE_TC_BULL_MIN": {"current": "64", "proposed": "55", "direction": "loosen", "reason": "Live bull_score distribution: p75=58, p90=61, max=68 -- 64 excluded everything but the top ~5%.", "risk": "LOW", "rollback_value": "64"},
+    "SMALL_PROBE_TC_BREAKOUT_CONFIRMATION_MIN": {"current": "60", "proposed": "42", "direction": "loosen", "reason": "Live breakout_confirmation_score distribution: median=38, p75=46, max=67 -- 60 excluded nearly everything.", "risk": "LOW-MEDIUM", "rollback_value": "60"},
+    "SMALL_PROBE_TC_VOL_15M_MIN": {"current": "0.95", "proposed": "0.55", "direction": "loosen", "reason": "Live 15m volume_vs_avg on valid candidates: p25=0.7, median=1.0 -- 0.95 excluded roughly half of genuinely average-volume setups.", "risk": "LOW", "rollback_value": "0.95"},
+    "SMALL_PROBE_TC_VOL_1H_MIN": {"current": "0.85", "proposed": "0.45", "direction": "loosen", "reason": "Live 1h volume_vs_avg median was 0.8; 0.85 excluded over half of candidates including several with clearly rising volume trend.", "risk": "LOW", "rollback_value": "0.85"},
+    "SMALL_PROBE_RC_SYNTH_MIN": {"current": "80", "proposed": "65", "direction": "loosen", "reason": "Same distribution issue as TC_SYNTH_MIN, applied to the reclaim_reversal branch.", "risk": "LOW", "rollback_value": "80"},
+    "SMALL_PROBE_RC_BULL_MIN": {"current": "64", "proposed": "52", "direction": "loosen", "reason": "Same distribution issue as TC_BULL_MIN, applied to the reclaim_reversal branch.", "risk": "LOW", "rollback_value": "64"},
+    "SMALL_PROBE_RC_BREAKOUT_CONFIRMATION_MIN": {"current": "52", "proposed": "36", "direction": "loosen", "reason": "Same distribution issue as TC_BREAKOUT_CONFIRMATION_MIN, applied to the reclaim_reversal branch.", "risk": "LOW-MEDIUM", "rollback_value": "52"},
+    "SMALL_PROBE_RC_VOL_15M_MIN": {"current": "0.90", "proposed": "0.50", "direction": "loosen", "reason": "Same distribution issue as TC_VOL_15M_MIN, applied to the reclaim_reversal branch.", "risk": "LOW", "rollback_value": "0.90"},
+    "SMALL_PROBE_RC_VOL_1H_MIN": {"current": "0.80", "proposed": "0.40", "direction": "loosen", "reason": "Same distribution issue as TC_VOL_1H_MIN, applied to the reclaim_reversal branch.", "risk": "LOW", "rollback_value": "0.80"},
+
+    "PHASE_D2_MIN_EXPECTED_NET_EDGE_PCT": {"current": "0.0125", "proposed": "0.0125", "direction": "keep", "reason": "D2 economics do not run in the entry path at all (assess_minimum_net_edge is only called from build_multi_exit_bracket_lite_plan, post-fill). Changing this parameter would have zero effect on why the bot opens 0 positions.", "risk": "NONE", "rollback_value": "0.0125"},
+    "PHASE_D2_MIN_REWARD_TO_FEE_RATIO": {"current": "3.0", "proposed": "3.0", "direction": "keep", "reason": "Same as above -- not in the entry path.", "risk": "NONE", "rollback_value": "3.0"},
+    "PHASE_D2_MIN_REWARD_TO_RISK_RATIO": {"current": "1.5", "proposed": "1.5", "direction": "keep", "reason": "Same as above -- not in the entry path.", "risk": "NONE", "rollback_value": "1.5"},
+    "MAX_SPREAD_PCT": {"current": "0.0060", "proposed": "0.0060", "direction": "keep", "reason": "Spread was never the binding constraint in the 72h audit window (typical spreads ~0.01-0.03%, two orders of magnitude below the cap).", "risk": "NONE", "rollback_value": "0.0060"},
+    "JUDGE_MIN_GATE_CONFIDENCE": {"current": "56", "proposed": "56", "direction": "keep", "reason": "This is the entry-gate hard filter, not the small-probe promotion gate; 86/144 records already passed it in the audit window. Not the bottleneck.", "risk": "NONE", "rollback_value": "56"},
+    "MAX_OPEN_POSITIONS": {"current": "3", "proposed": "3", "direction": "keep", "reason": "0 open positions today, far from this cap; not a blocker. (Separately fixed: this parameter was whitelisted but never mapped in BotConfig.__post_init__, making it a silent no-op via the approved-profile route -- fixed 2026-07-02 in bot/config.py.)", "risk": "NONE", "rollback_value": "3"},
+    "DEFAULT_QUOTE_SIZE_USDC": {"current": "50.00", "proposed": "50.00", "direction": "keep", "reason": "Small-probe promotions use their own fixed 20-25 USDC size (bot/strategy_engine.py probe_size), not this default; irrelevant to the fix.", "risk": "NONE", "rollback_value": "50.00"}
+  },
+
+  "code_fixes_applied": [
+    {
+      "severity": "CRITICAL",
+      "file": "bot/strategy_engine.py",
+      "function": "_maybe_promote_wait_to_small_probe",
+      "description": "mixed_context veto changed from an absolute bear_score>=max(40,bull-4) check (true in 64/64 live candidates) to a relative bear-minus-bull gap check against a configurable threshold (default 32, calibrated to the live p75 gap). bearish_htf changed from OR to AND semantics across the 4h and 1h EMA checks, removing the 46/64 false-negative caused by a lagging 4h EMA alone. All setup-specific quality thresholds (synth/bull/breakout_confirmation/volume) moved from hardcoded literals to bot/config.py fields, recalibrated to real live-data percentiles instead of a stale distribution.",
+      "test": "tests/test_small_probe_promotion_recalibration.py"
+    },
+    {
+      "severity": "LOW",
+      "file": "bot/config.py",
+      "function": "BotConfig.__post_init__",
+      "description": "MAX_OPEN_POSITIONS was in APPROVED_PARAMETER_PROFILE_WHITELIST but never mapped to a config attribute, making profile-driven changes to it a silent no-op. Added to int_fields mapping. Also added mappings for the new SMALL_PROBE_* parameters so they are governable the same way.",
+      "test": "tests/test_approved_parameter_profile.py (existing suite, still green)"
+    }
+  ],
+
+  "expected_effect_summary": {
+    "d_balanced_small_probe_simulation_over_last_72h": "6/64 valid candidates would have promoted to approve_trade across 4 distinct tickers (AVAX-USDC, BTC-USDC, ETH-USDC, SOL-USDC) -- see reports/backtests/recent-market-parameter-sweetspot-latest.md for the full per-profile comparison.",
+    "tickers_that_would_have_been_hit_in_last_72h": ["SOL-USDC", "ETH-USDC", "AVAX-USDC", "BTC-USDC"],
+    "which_blocker_this_relieves": "The judge_approve_trade=0 bottleneck identified in reports/audits/entry-funnel-72h-latest.md (valid_trade_plan=64 -> judge_approve_trade=0).",
+    "trade_frequency_estimate": "Roughly 1 small-probe candidate per 12h of live trading in a comparably trending market (6 candidates / 72h across 8 tickers), each capped at 20-25 USDC quote size.",
+    "confidence": "HIGH for the mechanism (deterministic replay of real recorded analyst scores); MEDIUM for future frequency (market-regime dependent)."
+  },
+
+  "activation_instructions": [
+    "1. This profile's parameter values are ALREADY the live defaults in bot/config.py as of this fix -- no .env change or approved-profile activation is required to get the effect.",
+    "2. To govern/rotate these values later via the existing approved-profile route: write them into state/approved_parameter_profile.json, set APPROVED_PARAMETER_PROFILE_HASH via tools/activate_approved_parameter_profile.py, set ENABLE_APPROVED_PARAMETER_PROFILE=true.",
+    "3. Restart the bot process to pick up the bot/strategy_engine.py and bot/config.py changes (this is a code change, not just a config value).",
+    "4. Monitor reports/audits/entry-funnel-72h-latest.md (re-run tools/trace_entry_funnel.py) over the next 24-48h for judge_approve_trade > 0.",
+    "5. Rollback: set SMALL_PROBE_MAX_BEAR_BULL_GAP=4 and SMALL_PROBE_REQUIRE_HTF_BOTH_TIMEFRAMES=false (or any subset) via the same approved-profile route to partially or fully revert without a code deploy."
+  ]
+}

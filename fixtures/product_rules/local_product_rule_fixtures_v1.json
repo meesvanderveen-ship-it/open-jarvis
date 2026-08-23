@@ -1,0 +1,32 @@
+{
+  "schema_version": "local_product_rule_fixtures_v1",
+  "evidence_timestamp_or_version": "local_product_rule_fixtures_v1_20260609",
+  "description": "Paper-only local product-rule fixture grid for configured USDC tickers. These records are not Coinbase live product-rule proof and do not authorize live trading.",
+  "default_fixture_rules": {
+    "quote_currency": "USDC",
+    "base_increment": "0.00000001",
+    "quote_increment": "0.01",
+    "price_increment": "0.01",
+    "min_order_size": "0.00000001",
+    "min_notional": "1"
+  },
+  "fixtures": [
+    {"ticker": "ETH-USDC", "base_currency": "ETH"},
+    {"ticker": "SOL-USDC", "base_currency": "SOL"},
+    {"ticker": "XRP-USDC", "base_currency": "XRP"},
+    {"ticker": "ADA-USDC", "base_currency": "ADA"},
+    {"ticker": "LINK-USDC", "base_currency": "LINK"},
+    {"ticker": "AVAX-USDC", "base_currency": "AVAX"},
+    {"ticker": "DOGE-USDC", "base_currency": "DOGE"},
+    {"ticker": "SUI-USDC", "base_currency": "SUI"},
+    {"ticker": "LTC-USDC", "base_currency": "LTC"},
+    {"ticker": "HBAR-USDC", "base_currency": "HBAR"},
+    {"ticker": "ATOM-USDC", "base_currency": "ATOM"},
+    {"ticker": "NEAR-USDC", "base_currency": "NEAR"},
+    {"ticker": "APT-USDC", "base_currency": "APT"},
+    {"ticker": "INJ-USDC", "base_currency": "INJ"},
+    {"ticker": "ARB-USDC", "base_currency": "ARB"},
+    {"ticker": "OP-USDC", "base_currency": "OP"},
+    {"ticker": "UNI-USDC", "base_currency": "UNI"}
+  ]
+}

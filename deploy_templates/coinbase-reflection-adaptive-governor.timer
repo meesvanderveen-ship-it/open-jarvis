@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Coinbase reflection/adaptive bounded parameter governor hourly
+
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+

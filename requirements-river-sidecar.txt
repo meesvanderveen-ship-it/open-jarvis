@@ -1,0 +1,22 @@
+# Optional report-only River sidecar environment.
+# Keep this isolated from the main runtime: River 0.23 declares pandas<3,
+# while the Coinbase bot's primary environment currently pins pandas==3.0.1.
+river==0.23.0
+# river==0.23.0's own PyPI metadata only declares numpy/pandas/scipy, but
+# river.base.base imports typing_extensions directly. On a clean venv that
+# resolves only river's declared dependencies (e.g. `pip install --find-links`
+# against a pre-downloaded wheel, or any resolver that doesn't pull every
+# transitive extra) this import fails *silently* from the bot's point of
+# view: bot/river_online_parameter_learner.py's `_import_river()` catches the
+# resulting ImportError and reports `river_native_sidecar_unavailable` with
+# no further detail. Verified on Python 3.12 / river 0.23.0 on 2026-06-21.
+typing_extensions
+
+# bot.autonomous_parameter_governor.load_project_env() reads the repo's .env
+# via python-dotenv before reading any governor env settings (ACK, mode,
+# enabled flag). Without it in this venv, a scheduled
+# `tools/prepare_growbot_river_governor_candidate.py --apply` run through
+# this interpreter would silently see governor_enabled=false / mode=report_only
+# regardless of what .env actually says, because load_dotenv() would be
+# unavailable. Same version pin as the main repo's requirements.txt.
+python-dotenv==1.2.2

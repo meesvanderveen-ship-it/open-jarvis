@@ -1,0 +1,12 @@
+[Unit]
+Description=Coinbase bot reflection/adaptive report-only sidecar
+Documentation=docs/REFLECTION_ADAPTIVE_SIDECAR.md
+
+# Do not enable without operator approval.
+# Report-only. No Coinbase actions. No service lifecycle actions.
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/apps/Crypto/coinbase_bot
+ExecStart=/usr/bin/python3 tools/run_reflection_adaptive_report_sidecar.py --json
+

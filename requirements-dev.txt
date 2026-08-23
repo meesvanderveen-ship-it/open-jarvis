@@ -1,0 +1,3 @@
+# Reproduceerbare lokale testlaag. Runtime packages staan vast in requirements.txt.
+-r requirements.txt
+pytest==7.4.4

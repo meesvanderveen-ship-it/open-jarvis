@@ -1,0 +1,14 @@
+[Unit]
+Description=Run Coinbase bot reflection/adaptive report-only sidecar periodically
+
+# Do not enable without operator approval.
+# Report-only. No Coinbase actions. No service lifecycle actions.
+
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=1h
+Persistent=false
+
+[Install]
+WantedBy=timers.target
+

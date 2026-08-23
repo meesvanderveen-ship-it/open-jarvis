@@ -1,0 +1,125 @@
+{
+  "profile_name": "recent_market_calibrated_candidate_v2",
+  "profile_version": 2,
+  "generated_at": "2026-06-27T12:00:00Z",
+  "source": "root_cause_diagnosis_7phase_analysis",
+  "description": "Candidate profile from 7-phase investigation (2026-06-27). Primary fix is code-level (is_valid_entry_trade_plan bug). Parameter changes are conservative and River-evidence-backed.",
+  "safe_to_test": true,
+  "rollback_profile": "state/approved_parameter_profile.json",
+
+  "parameter_changes": {
+    "PHASE_D2_MIN_EXPECTED_NET_EDGE_PCT": {
+      "current": "0.01227188",
+      "proposed": "0.01204697",
+      "direction": "loosen",
+      "change_pct": -1.83,
+      "reason": "River learning model proposes this with 53-cycle stable direction and 90.4% confidence.",
+      "source": "river_online_learner_proposal_53_stable_cycles",
+      "risk": "LOW"
+    },
+    "PHASE_D2_MIN_REWARD_TO_FEE_RATIO": {
+      "current": "3.0",
+      "proposed": "3.0",
+      "direction": "keep",
+      "reason": "River proposal to loosen was blocked (direction_not_stable). Keep at 3.0.",
+      "risk": "NONE"
+    },
+    "PHASE_D2_MIN_REWARD_TO_RISK_RATIO": {
+      "current": "1.5",
+      "proposed": "1.5",
+      "direction": "keep",
+      "risk": "NONE"
+    },
+    "MAX_SPREAD_PCT": {
+      "current": "0.0060",
+      "proposed": "0.0060",
+      "direction": "keep",
+      "reason": "Spread not a current blocker.",
+      "risk": "NONE"
+    },
+    "JUDGE_MIN_GATE_CONFIDENCE": {
+      "current": "56",
+      "proposed": "54",
+      "direction": "loosen",
+      "reason": "Watch-tier tickers at 54-55 confidence show constructive setups. Nano gate is cheap.",
+      "risk": "LOW"
+    },
+    "MAX_OPEN_POSITIONS": {
+      "current": "3",
+      "proposed": "3",
+      "direction": "keep",
+      "risk": "NONE"
+    },
+    "AUTONOMOUS_MAX_NEW_ORDERS_PER_CYCLE": {
+      "current": "1",
+      "proposed": "1",
+      "direction": "keep",
+      "risk": "NONE"
+    },
+    "AUTONOMOUS_MAX_OPEN_ORDERS": {
+      "current": "3",
+      "proposed": "3",
+      "direction": "keep",
+      "risk": "NONE"
+    },
+    "DEFAULT_QUOTE_SIZE_USDC": {
+      "current": "50.00",
+      "proposed": "50.00",
+      "direction": "keep",
+      "risk": "NONE"
+    }
+  },
+
+  "code_fixes_required": [
+    {
+      "severity": "CRITICAL",
+      "file": "bot/trade_planner.py",
+      "function": "is_valid_entry_trade_plan",
+      "description": "Old validator required risk_notes, why_plan_is_valid, why_size_is_small, planner_blockers to be non-empty - fields that TRADE_PLANNER_PROMPT never asks for. Result: valid_trade_plan=False for 100% of 292 generated plans over 6+ days. Fix validates only core numeric price/size fields.",
+      "fix_in_working_tree": true,
+      "expected_effect": "valid_trade_plan=True for all plans with complete numeric fields"
+    },
+    {
+      "severity": "MODERATE",
+      "file": "bot/trade_planner.py",
+      "function": "build_starter_probe_plan_from_context",
+      "description": "Relaxed invalidation_not_close_enough from 3.5% to 5.0%.",
+      "fix_in_working_tree": true
+    },
+    {
+      "severity": "MODERATE",
+      "file": "bot/prompts.py",
+      "function": "CLAUDE_JUDGE_PROMPT",
+      "description": "Threshold 0.15->0.12 default, 0.08 for valid breakout/reclaim. COST_OF_INACTION rule added.",
+      "fix_in_working_tree": true
+    },
+    {
+      "severity": "LOW",
+      "file": "bot/strategy_engine.py + bot/config.py",
+      "description": "Shadow Outcome Accelerator integration for richer River learning signal.",
+      "fix_in_working_tree": true
+    }
+  ],
+
+  "current_state_confirmation": {
+    "PHASE_C43_RUNTIME_SUBMIT_ACK": "SET in .env - C4.3 can submit live orders",
+    "ENABLE_PHASE_C_ACTUAL_COINBASE_SUBMIT": "true",
+    "EXECUTION_MODE": "live",
+    "open_positions": 0,
+    "open_orders": 0
+  },
+
+  "expected_trade_frequency_after_fixes": {
+    "immediate": "First trade within 1-4 hours after restart once trigger level reached",
+    "weekly": "2-5 entries per week depending on market conditions",
+    "confidence": "HIGH for code fixes; MEDIUM for timing (market-dependent)"
+  },
+
+  "activation_instructions": [
+    "1. Commit pending working tree changes (all 4 files pass py_compile)",
+    "2. Restart bot to load new code",
+    "3. Optionally update approved_parameter_profile.json with PHASE_D2_MIN_EXPECTED_NET_EDGE_PCT=0.01204697 via governor",
+    "4. Monitor next 2-3 cycles for valid_trade_plan=True",
+    "5. First approve_trade expected within 1-4 hours once trigger level reached"
+  ]
+}

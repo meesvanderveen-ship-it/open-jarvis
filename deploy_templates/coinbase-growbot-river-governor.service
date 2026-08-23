@@ -1,0 +1,23 @@
+[Unit]
+Description=Coinbase GrowBot/River learning cycle and governor-bridge refresh
+Documentation=docs/GROWBOT_RIVER_LEARNING_INTEGRATION.md
+
+# Refreshes the GrowBot/River episode/learning/scheduler/readiness chain and
+# the read-only governor-bridge status, then attempts the existing
+# autonomous_parameter_governor apply path -- still gated by the unchanged
+# ACK/mode/cooldown/regime/evidence/open-order safety rails, and holding the
+# same governor lock tools/run_autonomous_parameter_governor.py uses so the
+# two scheduled cycles can never race each other.
+# No Coinbase order submit/cancel/apply authority. No new activation route.
+#
+# Uses the isolated /opt/coinbase-river-sidecar venv (river==0.23.0) so the
+# refresh gets the real native-backend reading instead of the deterministic
+# approximation fallback; PYTHONPATH points it back at this repo so it can
+# still import bot.* and tools.*.
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/apps/Crypto/coinbase_bot
+Environment=PYTHONPATH=/root/apps/Crypto/coinbase_bot
+TimeoutStartSec=900
+ExecStart=/opt/coinbase-river-sidecar/bin/python tools/prepare_growbot_river_governor_candidate.py --apply --json

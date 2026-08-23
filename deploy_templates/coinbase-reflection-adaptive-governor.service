@@ -1,0 +1,12 @@
+[Unit]
+Description=Coinbase reflection/adaptive bounded parameter governor
+Documentation=docs/AUTONOMOUS_PARAMETER_GOVERNOR.md
+
+# Bounded governor runner only. No Coinbase order submit/cancel/apply authority.
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/apps/Crypto/coinbase_bot
+TimeoutStartSec=900
+ExecStart=/usr/bin/python3 tools/run_autonomous_parameter_governor.py --json
+
