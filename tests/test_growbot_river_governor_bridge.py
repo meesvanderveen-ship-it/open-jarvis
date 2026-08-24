@@ -521,8 +521,12 @@ def test_evaluate_fast_start_candidate_eligibility_blocked_when_sidecar_evidence
 
 
 def test_evaluate_fast_start_candidate_eligibility_blocked_by_parameter_not_on_allowlist() -> None:
-    proposal = _river_proposal(parameter="EXIT_TARGET_MAX_DISTANCE_FROM_MID_PCT")
-    definition = get_parameter("EXIT_TARGET_MAX_DISTANCE_FROM_MID_PCT")
+    # DEFAULT_QUOTE_SIZE_USDC is sizing/exposure, deliberately high_risk_manual_only
+    # and never fast_start-eligible -- unlike EXIT_TARGET_MAX_DISTANCE_FROM_MID_PCT,
+    # which was extended onto fast_start (2026-07 gap fix, see
+    # test_growbot_river_learning.py::test_fast_start_autotune_allowlist_is_narrower_than_full_governor_allowlist).
+    proposal = _river_proposal(parameter="DEFAULT_QUOTE_SIZE_USDC")
+    definition = get_parameter("DEFAULT_QUOTE_SIZE_USDC")
 
     result = evaluate_fast_start_candidate_eligibility(top_proposal=proposal, definition=definition, sidecar_ready=True)
 

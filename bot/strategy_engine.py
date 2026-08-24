@@ -44,9 +44,10 @@ from bot.phase_d3_controlled_live_exits import (
     D3_PHASE,
     build_phase_d3_controlled_live_exit_report,
     build_phase_d3_full_close_exit_intent,
+    build_phase_d3_take_profit_resting_exit_intent,
     submit_phase_d3_controlled_exit,
 )
-from bot.controlled_stop_market_exit_plan import build_controlled_stop_market_exit_plan
+from bot.controlled_stop_market_exit_plan import apply_controlled_stop_market_exit, build_controlled_stop_market_exit_plan
 from bot.phase_d2_position_executor import D2_PLAN_STATUS_READY
 from bot.order_store import OrderStore
 from bot.order_plan import build_order_intent_from_execution_plan, is_actionable_order_intent
@@ -278,7 +279,7 @@ class StrategyEngine:
         self.client = CoinbaseClient()
         self.market = MarketDataService(self.client)
         self.state = StateStore()
-        self.position_manager = PositionManager()
+        self.position_manager = PositionManager(cfg=self.cfg)
         self.reflection_store = TradeReflectionStore(
             max_records=getattr(self.cfg, "trade_reflection_max_records", 500)
         )
@@ -1689,12 +1690,23 @@ class StrategyEngine:
             "trend_continuation": "trend_continuation",
             "continuation": "trend_continuation",
             "momentum": "trend_continuation",
+            # Breakout-retest is a high-conviction continuation setup; bucket it with trend
+            # so it is not silently collapsed to "unclear" (smallest sizing cap).
+            "breakout_retest": "trend_continuation",
+            "breakout": "trend_continuation",
             "reclaim": "reclaim_reversal",
             "reversal": "reclaim_reversal",
             "reclaim_reversal": "reclaim_reversal",
+            # Sweep-reclaim and failed-breakout are reclaim/reversal-family setups (medium cap).
+            "support_sweep_reclaim": "reclaim_reversal",
+            "sweep_reclaim": "reclaim_reversal",
+            "failed_breakout": "reclaim_reversal",
             "mean_reversion": "mean_reversion",
             "meanrev": "mean_reversion",
             "mean reversion": "mean_reversion",
+            # Range trades behave like mean-reversion for sizing purposes.
+            "range_trade": "mean_reversion",
+            "range": "mean_reversion",
         }
         return aliases.get(value, "unclear")
 
@@ -2822,6 +2834,7 @@ class StrategyEngine:
                 allowed_keys=MODULE_ALLOWED_KEYS.get(module_name, []),
                 require_all_keys=module_name in {"meanrev", "bull", "bear", "synth"},
                 drop_unknown_keys=True,
+                payload_first=True,
             )
             if isinstance(payload, dict):
                 return payload
@@ -3362,6 +3375,25 @@ class StrategyEngine:
                 "entry_mode": entry_mode,
                 "trigger": str(payload.get("trigger", "")).strip(),
                 "trigger_wait_reason": str(payload.get("trigger_wait_reason", "")).strip(),
+                # Judge orderbook-entry refinements that CLAUDE_JUDGE_PROMPT asks for but
+                # were previously dropped here. ONLY pure-observability fields are surfaced:
+                # each was verified (grep over bot/*.py) to have zero gating/pricing
+                # consumers, so preserving them keeps trading behavior byte-identical and
+                # only makes the judge's own reasoning visible in logs/analysis. The
+                # decision-affecting fields (preferred_limit_price, invalidation_price,
+                # do_not_chase_above, entry_zone_low/high, target_price_1/2,
+                # cancel_if_price_below/above, support_level) are intentionally NOT surfaced
+                # here — they feed objective_trade_score / orderbook_entry_planner /
+                # pending_entry_lifecycle and would change entries or the approve/wait gate,
+                # which this pass deliberately avoids.
+                "setup_quality_score": self._to_float(payload.get("setup_quality_score"), None),
+                "trigger_readiness": str(payload.get("trigger_readiness", "")).strip(),
+                "orderbook_entry_candidate": self._boolish(payload.get("orderbook_entry_candidate"), False),
+                "recommended_entry_type": str(payload.get("recommended_entry_type", "")).strip(),
+                "setup_expiry_minutes": self._to_float(payload.get("setup_expiry_minutes"), None),
+                "entry_reason": str(payload.get("entry_reason", "")).strip(),
+                "why_not_market_order": str(payload.get("why_not_market_order", "")).strip(),
+                "why_resting_limit_is_or_is_not_valid": str(payload.get("why_resting_limit_is_or_is_not_valid", "")).strip(),
             }
             if isinstance(payload.get("normalized_aliases"), list):
                 normalized["normalized_aliases"] = [str(a) for a in payload.get("normalized_aliases", [])]
@@ -4416,6 +4448,131 @@ class StrategyEngine:
                 errors.append(self._log_error(ticker, e))
 
         return feature_packs, errors
+
+    def _compute_portfolio_value_usdc(
+        self,
+        feature_packs: Dict[str, Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Total account equity in USDC: free USDC cash plus the current
+        market value of every asset actually held on the exchange (not just
+        bot-managed positions), so entry sizing scales with the real account
+        size. Priced from this cycle's already-fetched feature packs; a
+        currency with no corresponding <CCY>-USDC feature pack this cycle
+        contributes 0 rather than guessing -- safe direction, since it can
+        only undercount equity and so only shrinks position sizing, never
+        inflates it.
+        """
+        quote_symbol = "USDC"
+        if self.client is None:
+            return {"total_usdc": Decimal("0"), "holdings": {}, "priced": False, "error": "no_coinbase_client"}
+        try:
+            balances = self.client.get_all_balances()
+        except Exception as e:
+            self._write_jsonl("errors.jsonl", {
+                "generated_at": self._now_iso(),
+                "module": "portfolio_value",
+                "error_type": type(e).__name__,
+                "error": str(e),
+            })
+            return {"total_usdc": Decimal("0"), "holdings": {}, "priced": False, "error": str(e)}
+
+        holdings: Dict[str, Any] = {}
+        total = Decimal("0")
+        for currency, balance in balances.items():
+            if balance <= Decimal("0"):
+                continue
+            if currency == quote_symbol:
+                value = balance
+                priced = True
+            else:
+                ticker = f"{currency}-{quote_symbol}"
+                price = self._to_decimal(
+                    (feature_packs.get(ticker) or {}).get("market", {}).get("mid_price"),
+                    "0",
+                )
+                priced = price > Decimal("0")
+                value = balance * price if priced else Decimal("0")
+            holdings[currency] = {"balance": str(balance), "value_usdc": str(value), "priced": priced}
+            total += value
+
+        return {"total_usdc": total, "holdings": holdings, "priced": True}
+
+    def _apply_portfolio_based_entry_sizing(
+        self,
+        feature_packs: Dict[str, Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Price the account once per cycle and refresh every entry-sizing
+        cap on self.cfg to portfolio_value_usdc * {min,max}_position_pct_of_portfolio,
+        then stamp the same portfolio context onto every ticker's feature
+        pack so dynamic_entry_sizing (and anything else reading
+        risk_context) sees the current policy.
+
+        min/max_live_order_quote_usdc are included here too: they gate
+        validate_entry_quote_size (the entry-side guard chain in
+        phase_c_live_guard.py/phase_c_live_submitter.py/
+        phase_c43_autonomous_entry_live.py) and also happen to be the base
+        of the D3 exit min-quote floor (effective_exit_min_quote /
+        phase_d3_controlled_live_exits.py's own min_quote calc). Once entries
+        are sized at 10-20% of portfolio, a fixed 50 USDC exit floor no
+        longer means anything -- letting it scale with the same policy is
+        the correct behavior, not just a side effect: a blocked/too-small
+        reduce still safely falls back to a full close or a resting TP order
+        (see _maybe_route_full_workflow_position_exit_to_d3).
+        """
+        portfolio = self._compute_portfolio_value_usdc(feature_packs)
+        total = self._to_decimal(portfolio.get("total_usdc"), "0")
+
+        if portfolio.get("priced") and total > Decimal("0"):
+            min_pct = self._to_decimal(getattr(self.cfg, "min_position_pct_of_portfolio", "0.10"), "0.10")
+            max_pct = self._to_decimal(getattr(self.cfg, "max_position_pct_of_portfolio", "0.20"), "0.20")
+            min_quote = total * min_pct
+            max_quote = total * max_pct
+            self.cfg.min_dynamic_entry_quote_usdc = min_quote
+            self.cfg.max_dynamic_entry_quote_usdc = max_quote
+            self.cfg.min_live_order_quote_usdc = min_quote
+            self.cfg.max_live_order_quote_usdc = max_quote
+            self.cfg.phase_c_max_order_quote = max_quote
+            self.cfg.autonomous_max_order_quote = max_quote
+            # These four were left on their static .env values when the
+            # portfolio-percentage feature first shipped, which silently
+            # fights it: max_notional_usd is enforced as a hard block (not a
+            # clamp) in amount_cap_guard.evaluate_amount_cap_guard, so any
+            # calculated_quote above the old fixed 100.00 got the whole BUY
+            # rejected outright once portfolio_value_usdc made max_quote
+            # exceed it. phase_d3_max_exit_order_quote and
+            # controlled_stop_exit_max_quote_usd gate the full-close and
+            # stop-loss exit paths (phase_d3_controlled_live_exits.py,
+            # controlled_stop_market_exit_plan.py) the same way a stop-loss
+            # on a position sized above the old fixed 120.00 could get its
+            # protective exit blocked or silently truncated. default_quote_size_usdc
+            # floors the pre-sizing execution-feasibility estimate in
+            # _entry_context_quote_and_price, understating real slippage/spread
+            # exposure for the LLM chain once actual entries exceed 50.00.
+            self.cfg.max_notional_usd = max_quote
+            self.cfg.default_quote_size_usdc = min_quote
+            self.cfg.phase_d3_max_exit_order_quote = max_quote
+            self.cfg.controlled_stop_exit_max_quote_usd = max_quote
+            portfolio["min_entry_quote_usdc"] = str(min_quote)
+            portfolio["max_entry_quote_usdc"] = str(max_quote)
+        else:
+            # Pricing failed this cycle (no client, API error, or zero
+            # balance) -- leave whatever entry caps are already on self.cfg
+            # (last successful cycle's values, or the startup fallback)
+            # rather than zeroing them out and blocking every entry.
+            portfolio["min_entry_quote_usdc"] = str(getattr(self.cfg, "min_dynamic_entry_quote_usdc", "0"))
+            portfolio["max_entry_quote_usdc"] = str(getattr(self.cfg, "max_dynamic_entry_quote_usdc", "0"))
+
+        for fp in feature_packs.values():
+            risk_context = fp.setdefault("risk_context", {})
+            risk_context["portfolio_value_usdc"] = str(total)
+            risk_context["portfolio_priced"] = bool(portfolio.get("priced"))
+
+        self._write_jsonl("portfolio_value.jsonl", {
+            "generated_at": self._now_iso(),
+            **{k: v for k, v in portfolio.items() if k != "holdings"},
+            "holdings": portfolio.get("holdings"),
+        })
+        return portfolio
 
     def _suppress_repeated_partial_take_profit_action(
         self,
@@ -6551,18 +6708,19 @@ class StrategyEngine:
             or ""
         ).strip()
         reason = str(action.get("reason") or "stop_or_invalidation_close")
+        market_context = {
+            "current_price": str(current_price),
+            "mid_price": str(current_price),
+            "best_bid": orderbook.get("best_bid"),
+            "best_ask": orderbook.get("best_ask"),
+            "reason": reason,
+            "reasons": [reason, *[str(item) for item in metadata.get("reasons", [])]],
+        }
         stop_preview = build_controlled_stop_market_exit_plan(
             ticker=ticker,
             linked_position_id=linked_position_id,
             position=position,
-            market_context={
-                "current_price": str(current_price),
-                "mid_price": str(current_price),
-                "best_bid": orderbook.get("best_bid"),
-                "best_ask": orderbook.get("best_ask"),
-                "reason": reason,
-                "reasons": [reason, *[str(item) for item in metadata.get("reasons", [])]],
-            },
+            market_context=market_context,
             cfg=self.cfg,
             order_store=self.order_store,
             state_store=self.state,
@@ -6583,8 +6741,154 @@ class StrategyEngine:
                 "market_order_allowed": False,
             },
         })
+
+        # Mode B: only engages when enable_controlled_stop_market_exits,
+        # enable_autonomous_stop_exit_cancel/submit/apply and the exact
+        # MODE_B_CONTROLLED_STOP_EXIT_ACK are ALL satisfied (see
+        # docs/MODE_B_CONTROLLED_STOP_EXIT_ACTIVATION_PLAN.md). Otherwise
+        # this stays exactly the Mode-A preview-only behavior above.
+        stop_config = stop_preview.get("config") or {}
+        mode_b_armed = bool(
+            stop_config.get("enable_controlled_stop_market_exits")
+            and stop_config.get("enable_autonomous_stop_exit_cancel")
+            and stop_config.get("enable_autonomous_stop_exit_submit")
+            and stop_config.get("enable_autonomous_stop_exit_apply")
+            and stop_config.get("mode_b_ack_valid")
+        )
+        if mode_b_armed:
+            apply_result = apply_controlled_stop_market_exit(
+                ticker=ticker,
+                position=position,
+                market_context=market_context,
+                cfg=self.cfg,
+                order_store=self.order_store,
+                state_store=self.state,
+                coinbase_client=self.client,
+            )
+            execution_record["controlled_stop_exit_apply"] = apply_result
+            filled_base = self._to_decimal(apply_result.get("filled_base"), "0")
+            if apply_result.get("status") == "filled_awaiting_local_apply" and filled_base > Decimal("0"):
+                exit_price = self._to_decimal(apply_result.get("avg_fill_price"), "0") or current_price
+                inventory_state = self._extract_position_inventory_state(position)
+                bot_managed_base_before = inventory_state["bot_managed_base"]
+                sell_bot_base = min(filled_base, bot_managed_base_before)
+                realized_pnl = self._compute_realized_pnl(
+                    position=position,
+                    exit_base_size=sell_bot_base,
+                    exit_price=exit_price,
+                )
+                self.state.add_realized_pnl(realized_pnl)
+                remaining_bot_managed_base = max(Decimal("0"), bot_managed_base_before - sell_bot_base)
+                if remaining_bot_managed_base <= self.position_epsilon_base:
+                    closed_position = self.state.mark_position_closed(
+                        ticker=ticker,
+                        close_reason=reason,
+                        close_price=str(exit_price),
+                        realized_pnl=realized_pnl,
+                    )
+                    self._record_trade_reflection(
+                        ticker=ticker,
+                        position_before=position,
+                        closed_position=closed_position,
+                        action=action,
+                        feature_pack=feature_pack,
+                        chart_patterns=build_chart_pattern_context(feature_pack),
+                        trade_plan=metadata.get("trade_plan") or {},
+                        judge=metadata.get("judge") or {"decision": reason, "strategy": reason},
+                        execution_record=execution_record,
+                        realized_pnl=realized_pnl,
+                        exit_price=exit_price,
+                        source="controlled_stop_market_exit_mode_b",
+                    )
+                else:
+                    self.state.upsert_position(ticker, {
+                        "position_size_base": str(remaining_bot_managed_base),
+                        "position_size_quote": str(remaining_bot_managed_base * exit_price),
+                        "bot_managed_base": str(remaining_bot_managed_base),
+                    })
+                execution_record["status"] = "controlled_stop_market_exit_applied"
+                execution_record["executed"] = True
+
         self._write_jsonl("execution.jsonl", execution_record)
         return execution_record
+
+    def _maybe_place_proactive_take_profit_exit(
+        self,
+        *,
+        ticker: str,
+        position: Dict[str, Any],
+        feature_pack: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        """Rest a maker limit SELL at the position's take_profit_price ahead of time.
+
+        Without this, the position only has a *reactive* plan: a level
+        crossing is noticed and acted on next cycle/heartbeat. A fast move
+        through the take-profit level between cycles would otherwise be
+        missed entirely, since no live order was ever resting to catch it.
+        Runs only on a "hold" cycle (no close/reduce already happening this
+        cycle) and is idempotent: skips if any D3 exit order is already open
+        for this ticker.
+        """
+        if str(position.get("status") or "").strip().lower() != "open":
+            return None
+        inventory_state = self._extract_position_inventory_state(position)
+        bot_managed_base = inventory_state["bot_managed_base"]
+        if bot_managed_base <= self.position_epsilon_base:
+            return None
+        if self._to_decimal(position.get("take_profit_price"), "0") <= Decimal("0"):
+            return None
+        if self.order_store.open_exit_orders(ticker):
+            return None
+
+        blockers = self._full_workflow_d3_bridge_blockers(
+            action_type="close",
+            side="SELL",
+            position=position,
+        )
+        if blockers:
+            return {"attempted": False, "submitted": False, "blockers": blockers}
+
+        orderbook_context = self._feature_pack_orderbook_context(feature_pack)
+        exchange_rules = self._feature_pack_exchange_rules(feature_pack)
+        runtime_submit_ack = str(getattr(self.cfg, "phase_d3_runtime_submit_ack", "") or "").strip()
+        position_id = str(position.get("order_id") or position.get("position_id") or "")
+
+        exit_intent = build_phase_d3_take_profit_resting_exit_intent(
+            cfg=self.cfg,
+            ticker=ticker,
+            position=position,
+            order_store=self.order_store,
+            orderbook_context=orderbook_context,
+            exchange_rules=exchange_rules,
+            label="TP1",
+            source_reason="proactive_take_profit_resting_order",
+        )
+        if exit_intent.get("blockers"):
+            return {"attempted": True, "submitted": False, "blockers": exit_intent["blockers"], "exit_intent": exit_intent}
+
+        plan = {
+            "plan_id": f"d3-proactive-tp1-{ticker}-{position_id or 'position'}",
+            "status": D2_PLAN_STATUS_READY,
+            "ticker": ticker,
+            "position_id": position_id,
+            "exits": [],
+        }
+        d3_result = submit_phase_d3_controlled_exit(
+            cfg=self.cfg,
+            position=position,
+            plan=plan,
+            exit_intent=exit_intent,
+            order_store=self.order_store,
+            coinbase_client=self.client,
+            human_ack=runtime_submit_ack,
+            submit_live=True,
+        )
+        return {
+            "attempted": True,
+            "submitted": bool(d3_result.get("live_order_submitted")),
+            "status": d3_result.get("status"),
+            "exit_intent": exit_intent,
+        }
 
     def _maybe_route_full_workflow_position_exit_to_d3(
         self,
@@ -6629,10 +6933,27 @@ class StrategyEngine:
         runtime_submit_ack = str(getattr(self.cfg, "phase_d3_runtime_submit_ack", "") or "").strip()
         d3_result: Dict[str, Any]
 
-        if action_type == "close":
+        if action_type in ("close", "reduce"):
+            # Both go through the same direct discretionary-exit intent path.
+            # This intentionally bypasses the D.2 report's take-profit-bracket
+            # fee-edge gate (assess_minimum_net_edge / reward-to-fee ratio):
+            # that gate answers "is opening a fresh TP bracket from here still
+            # profitable after fees," which is the wrong question for a
+            # judge-decided close/reduce_size -- the judge already weighed the
+            # full risk/thesis context, and routing its decision through a
+            # profit-bracket-only gate silently no-ops legitimate risk-driven
+            # exits (observed live: a reduce_size for a weakening SOL-USDC
+            # thesis returned d3_no_ready_position_executor_plan because the
+            # position's own take-profit was too close to entry to clear the
+            # fee-edge minimum). Genuine stop/invalidation breaches are still
+            # routed above to the separate controlled-stop-exit route.
+            is_full_close = action_type == "close"
+            label = "FULL_CLOSE" if is_full_close else "PARTIAL_REDUCE"
+            plan_prefix = "d3-full-close" if is_full_close else "d3-partial-reduce"
+            default_reason = "full_workflow_close_position" if is_full_close else "full_workflow_reduce_position"
             position_id = str(position.get("order_id") or position.get("position_id") or "")
             plan = {
-                "plan_id": f"d3-full-close-{ticker}-{position_id or 'position'}",
+                "plan_id": f"{plan_prefix}-{ticker}-{position_id or 'position'}",
                 "status": D2_PLAN_STATUS_READY,
                 "ticker": ticker,
                 "position_id": position_id,
@@ -6646,12 +6967,13 @@ class StrategyEngine:
                 orderbook_context=orderbook_context,
                 exchange_rules=exchange_rules,
                 requested_base_size=sell_size_base,
-                label="FULL_CLOSE",
-                source_reason=str(action.get("reason") or "full_workflow_close_position"),
+                label=label,
+                source_reason=str(action.get("reason") or default_reason),
                 market_evidence_price=self._position_action_market_evidence(
                     action=action,
                     feature_pack=feature_pack,
                 ),
+                is_full_close=is_full_close,
             )
             d3_result = submit_phase_d3_controlled_exit(
                 cfg=self.cfg,
@@ -6671,6 +6993,12 @@ class StrategyEngine:
                 "blockers": (d3_result.get("readiness") or {}).get("blockers", []) + d3_result.get("hard_blocks", []),
             }
         else:
+            # Currently unreachable from this call site: _full_workflow_d3_bridge_blockers
+            # above already rejects any action_type outside {"close", "reduce"}
+            # with "position_action_not_d3_routable" before this branch is
+            # reached. Left as a defensive fallback for the D2-report-based
+            # route (still used directly by other D3 reporting/lifecycle
+            # callers) in case the allowed action_type set is ever widened.
             d3_report = build_phase_d3_controlled_live_exit_report(
                 cfg=self.cfg,
                 ticker=ticker,
@@ -6733,6 +7061,13 @@ class StrategyEngine:
                 self.state.upsert_position(ticker, updated_position)
 
             execution_record["status"] = "hold_position"
+            proactive_tp = self._maybe_place_proactive_take_profit_exit(
+                ticker=ticker,
+                position=updated_position or position,
+                feature_pack=feature_pack,
+            )
+            if proactive_tp is not None:
+                execution_record["proactive_take_profit_exit"] = proactive_tp
             self._write_jsonl("execution.jsonl", execution_record)
             return execution_record
 
@@ -6751,6 +7086,17 @@ class StrategyEngine:
             return execution_record
 
         working_position = dict(updated_position or position)
+        # `position` can be a snapshot fetched at the top of this cycle, minutes
+        # before this point (analyze_ticker's judge call is slow). A concurrent
+        # heartbeat/trailing-stop update in that window persists a newer
+        # stop_price to disk without this in-memory copy ever seeing it, which
+        # then fails protective-risk-completeness checks downstream on a stale
+        # stop_price == entry_price artifact even though the live position is
+        # actually risk-complete. Re-read the latest persisted state so the D3
+        # exit routing never blocks on data that is already out of date.
+        fresh_position = self.state.get_position(ticker)
+        if fresh_position and str(fresh_position.get("status", "open")).lower() == "open":
+            working_position = {**working_position, **fresh_position}
         inventory_state = self._extract_position_inventory_state(working_position)
         bot_managed_base_before = inventory_state["bot_managed_base"]
         legacy_inventory_base_before = inventory_state["legacy_inventory_base"]
@@ -6867,6 +7213,44 @@ class StrategyEngine:
             execution_record=execution_record,
         )
         if d3_bridge_result is not None:
+            # A blocked partial reduce (typically the sliced amount falling
+            # under min_live_order_quote_usdc on a small position) otherwise
+            # leaves nothing resting on the book even though the judge just
+            # flagged reduced conviction. Rest the position's own take-profit
+            # order as a fallback so a favorable move between cycles still
+            # fills something instead of relying on the next reactive check.
+            if action_type == "reduce" and not d3_bridge_result.get("executed"):
+                proactive_tp = self._maybe_place_proactive_take_profit_exit(
+                    ticker=ticker,
+                    position=working_position,
+                    feature_pack=feature_pack,
+                )
+                if proactive_tp is not None:
+                    d3_bridge_result["proactive_take_profit_exit_fallback"] = proactive_tp
+
+                tp_blockers = set((proactive_tp or {}).get("blockers") or [])
+                if "take_profit_price_at_or_below_current_bid_use_discretionary_close_instead" in tp_blockers:
+                    # Price already ran through the take-profit target, so a
+                    # resting maker order there would cross the book, and the
+                    # reduce was too small to trim partially under the min
+                    # quote floor. Reduce-only, a full close is the only
+                    # action left that can still legally go out.
+                    full_close_result = self._maybe_route_full_workflow_position_exit_to_d3(
+                        ticker=ticker,
+                        position=working_position,
+                        action=action,
+                        feature_pack=feature_pack,
+                        action_type="close",
+                        side=side,
+                        sell_size_base=bot_managed_base_before,
+                        execution_record=execution_record,
+                    )
+                    if full_close_result is not None:
+                        full_close_result["escalated_from_blocked_partial_reduce"] = True
+                        self._write_jsonl("execution.jsonl", full_close_result)
+                        return full_close_result
+                elif proactive_tp is not None:
+                    self._write_jsonl("execution.jsonl", d3_bridge_result)
             return d3_bridge_result
 
         execution_record["status"] = "d3_controlled_exit_blocked_by_policy"
@@ -7311,6 +7695,7 @@ class StrategyEngine:
         )
 
         feature_packs, scan_errors = self._scan_market_universe(universe)
+        self._apply_portfolio_based_entry_sizing(feature_packs)
         paper_order_cycle_summary = self._review_paper_open_orders_for_feature_packs(
             feature_packs,
             cycle_source="run_cycle",

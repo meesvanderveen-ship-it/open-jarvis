@@ -125,6 +125,76 @@ def test_insufficient_balance_for_50_blocks_entry_instead_of_downsizing():
     assert "insufficient_quote_balance_for_min_dynamic_entry" in report["blockers"]
 
 
+def test_portfolio_priced_sizes_between_10_and_20_pct_by_quality():
+    analysis = _analysis()
+    analysis["feature_pack"]["risk_context"]["portfolio_value_usdc"] = "2000.00"
+    analysis["feature_pack"]["risk_context"]["available_quote_balance"] = "2000.00"
+    cfg = _cfg(min_position_pct_of_portfolio=Decimal("0.10"), max_position_pct_of_portfolio=Decimal("0.20"))
+
+    weak_report = calculate_dynamic_entry_quote(cfg=cfg, analysis=analysis)
+    assert weak_report["portfolio_priced"] is True
+    assert Decimal(weak_report["min_quote"]) == Decimal("200.00")
+    assert Decimal(weak_report["max_quote"]) == Decimal("400.00")
+    assert Decimal("200.00") <= Decimal(weak_report["clamped_quote"]) < Decimal("300.00")
+
+    strong_analysis = _analysis(confidence=98, edge=98, objective=98)
+    strong_analysis["feature_pack"]["risk_context"]["portfolio_value_usdc"] = "2000.00"
+    strong_analysis["feature_pack"]["risk_context"]["available_quote_balance"] = "2000.00"
+    strong_analysis["orderbook_entry_preview"] = {"expected_reward_to_fee": "7.0", "expected_reward_to_risk": "4.0"}
+    strong_report = calculate_dynamic_entry_quote(
+        cfg=cfg,
+        analysis=strong_analysis,
+        execution_plan={
+            "orderbook_summary": {
+                "freshness_status": "fresh",
+                "spread_pct": "0.0002",
+                "depth_score": "100",
+                "imbalance": "0.8",
+            }
+        },
+    )
+    assert Decimal(strong_report["clamped_quote"]) == Decimal("400.00")
+
+
+def test_larger_portfolio_sizes_proportionally_larger_at_same_quality():
+    small = _analysis()
+    small["feature_pack"]["risk_context"]["portfolio_value_usdc"] = "1000.00"
+    small["feature_pack"]["risk_context"]["available_quote_balance"] = "1000.00"
+    big = _analysis()
+    big["feature_pack"]["risk_context"]["portfolio_value_usdc"] = "10000.00"
+    big["feature_pack"]["risk_context"]["available_quote_balance"] = "10000.00"
+    cfg = _cfg()
+
+    small_report = calculate_dynamic_entry_quote(cfg=cfg, analysis=small)
+    big_report = calculate_dynamic_entry_quote(cfg=cfg, analysis=big)
+
+    # Same setup quality (identical fixtures otherwise) -> same fraction of
+    # each portfolio's own range, so a 10x bigger portfolio sizes exactly
+    # 10x bigger for the identical setup.
+    assert small_report["quality_fraction"] == big_report["quality_fraction"]
+    assert Decimal(big_report["clamped_quote"]) == Decimal(small_report["clamped_quote"]) * 10
+
+
+def test_no_portfolio_pricing_falls_back_to_configured_usdc_rails():
+    analysis = _analysis()  # no portfolio_value_usdc in risk_context
+    report = calculate_dynamic_entry_quote(cfg=_cfg(), analysis=analysis)
+    assert report["portfolio_priced"] is False
+    assert report["min_quote"] == "50.00"
+    assert report["max_quote"] == "100.00"
+
+
+def test_insufficient_free_cash_blocks_even_with_large_portfolio_value():
+    # Portfolio equity can be high (illiquid crypto holdings) while free
+    # USDC cash is low -- sizing must key off available cash, not the total.
+    analysis = _analysis()
+    analysis["feature_pack"]["risk_context"]["portfolio_value_usdc"] = "2000.00"
+    analysis["feature_pack"]["risk_context"]["available_quote_balance"] = "50.00"
+    report = calculate_dynamic_entry_quote(cfg=_cfg(), analysis=analysis)
+    assert report["accepted"] is False
+    assert report["clamped_quote"] == "0"
+    assert "insufficient_quote_balance_for_min_dynamic_entry" in report["blockers"]
+
+
 def test_c43_wires_deterministic_quote_before_payload_preparation(tmp_path):
     analysis = _analysis(confidence=80, edge=75, objective=75)
     execution_plan = {

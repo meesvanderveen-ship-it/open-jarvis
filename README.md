@@ -56,9 +56,16 @@ Safety defaults that ship in this repo:
   flags disabled.
 - `MARKET_ORDER_ENABLED` / `ENABLE_MARKET_ORDERS` / `ALLOW_MARKET_ORDERS`
   all `false`; the only supported live execution paths are governed
-  post-only limit BUY entries and reduce-only limit SELL exits.
-- Live order sizing is rail-bound between `MIN_LIVE_ORDER_QUOTE_USDC` and
-  `MAX_LIVE_ORDER_QUOTE_USDC` (50–100 USDC by default).
+  post-only limit BUY entries, reduce-only limit SELL exits, and a
+  governed near-market limit-IOC stop-exit for stop-breach closes (see
+  "Noodstop-exit" below) — never a true unconstrained market order.
+- Live entry sizing scales with the account: each cycle the bot prices total
+  portfolio equity (free USDC cash plus the market value of every held
+  asset) and sizes new BUY entries at `MIN_POSITION_PCT_OF_PORTFOLIO`–
+  `MAX_POSITION_PCT_OF_PORTFOLIO` of that value (10%–20% by default), not a
+  fixed USDC amount. `MIN_LIVE_ORDER_QUOTE_USDC`/`MAX_LIVE_ORDER_QUOTE_USDC`
+  (50–100 USDC) remain as the startup/fallback rails, used only before the
+  first successful portfolio pricing.
 - An autonomous parameter governor (GrowBot/River bridge) can only ever
   *propose* parameter changes through the existing approved-profile/hash-ACK
   route; it has no independent apply or Coinbase-submit authority.
@@ -249,9 +256,13 @@ hieronder) en de gevolgen begrijpt. In grote lijnen:
 5. Vul de bijbehorende `*_ACK`-omgevingsvariabele in met exact de gevraagde
    bevestigingstekst — dit is een bewuste, expliciete "ik begrijp het risico"
    handtekening, geen technische formaliteit.
-6. Houd de order- en positiegrootte aan de veilige kant: live orders zijn
-   standaard begrensd tussen `MIN_LIVE_ORDER_QUOTE_USDC` en
-   `MAX_LIVE_ORDER_QUOTE_USDC` (50–100 USDC).
+6. Houd de order- en positiegrootte aan de veilige kant: live entries worden
+   standaard geschaald naar `MIN_POSITION_PCT_OF_PORTFOLIO`–
+   `MAX_POSITION_PCT_OF_PORTFOLIO` van je totale portfolio-waarde (standaard
+   10%–20%), met `MIN_LIVE_ORDER_QUOTE_USDC`/`MAX_LIVE_ORDER_QUOTE_USDC`
+   (50–100 USDC) als vaste fallback zolang portfolio-pricing nog niet is
+   gelukt (bijv. direct na opstarten). Zie de sectie "Orderomvang" hieronder
+   voor de volledige uitleg.
 
 Doe dit stapsgewijs, één laag per keer, en gebruik de read-only tools uit
 Stap 6 vóór en na elke wijziging om te controleren wat er feitelijk gebeurt.
@@ -276,6 +287,11 @@ Start in `EXECUTION_MODE=paper`. Moving any flag from the safe
 `.env.example` defaults toward live trading is a deliberate, individually
 reviewed decision — read the relevant doc in `docs/` for that subsystem
 before flipping it.
+
+De set gevolgde tickers wordt bepaald door `ALLOWED_TICKERS` /
+`PHASE_C_ALLOWED_TICKERS` in je eigen `.env`. Op dit moment draait de live
+bot met een bewust kleiner universum — `BTC-USDC, ETH-USDC, SOL-USDC,
+LINK-USDC` — in plaats van de bredere lijst in `.env.example`.
 
 ## Running
 
@@ -343,7 +359,14 @@ keten van gespecialiseerde lagen die elkaar controleren:
    geeft **nooit** zelf toestemming om te handelen.
 3. **Specialist analysts** — los van elkaar beoordelen een trend-specialist,
    breakout-specialist, mean-reversion-specialist en regime/context-specialist
-   dezelfde data, elk met een eigen afgebakende JSON-output.
+   dezelfde data, elk met een eigen afgebakende JSON-output. Deze specialisten
+   delen per cyclus hetzelfde grote dossier (feature pack, chart-patronen,
+   reflecties, beslissingsuitkomsten); dat gedeelde blok wordt daarom als
+   eerste bericht verstuurd en de kleine, specialist-specifieke instructie als
+   laatste (`bot/llm_clients.py::json_response`, `payload_first=True`), zodat
+   OpenAI's automatische prompt-caching het over alle specialisten in de
+   cyclus kan hergebruiken — dit verlaagt de kosten van de grootste
+   LLM-aanroepgroep zonder de promptinhoud zelf te wijzigen.
 4. **Bull/bear debat** — een bull- en een bear-redenaar maken bewust de
    tegengestelde argumenten expliciet zichtbaar, in plaats van één gemiddelde
    mening te verzinnen.
@@ -374,8 +397,9 @@ entry-brug (`bot/phase_c43_autonomous_entry_live.py`, fase **C.4.3**):
 
 - Altijd een **post-only limit BUY** — nooit een market order, en nooit een
   SELL vanuit deze brug.
-- Kleine, gerailde orderomvang: tussen `MIN_LIVE_ORDER_QUOTE_USDC` en
-  `MAX_LIVE_ORDER_QUOTE_USDC` (standaard 50–100 USDC).
+- Gerailde orderomvang die meeschaalt met je portfolio: standaard 10%–20%
+  van de totale accountwaarde (zie "Orderomvang: percentage van de
+  portfolio-waarde" hieronder voor de volledige uitleg).
 - Elke order wordt lokaal geregistreerd in de `OrderStore`, met een mapping
   tussen `client_order_id` en het door Coinbase teruggegeven
   `exchange_order_id`.
@@ -384,6 +408,67 @@ entry-brug (`bot/phase_c43_autonomous_entry_live.py`, fase **C.4.3**):
   state staan.
 - Het plaatsen van de order maakt **nog geen positie** aan — een positie
   ontstaat pas na bewezen fill (zie hieronder).
+
+### Orderomvang: percentage van de portfolio-waarde
+
+De deterministische sizing-laag (`bot/dynamic_entry_sizing.py`, aangeroepen
+vanuit `bot/strategy_engine.py::_apply_portfolio_based_entry_sizing`)
+bepaalt zelf het uiteindelijke bedrag van elke live BUY. De LLM-planner en
+-judge rapporteren wel een `size_quote`/`max_size_quote`, maar dat is altijd
+een **niet-autoritatieve placeholder** — deze code kiest het echte bedrag,
+niet de AI-laag.
+
+- Elke cyclus prijst `StrategyEngine._compute_portfolio_value_usdc()` de
+  totale accountwaarde: vrij USDC-saldo plus de marktwaarde van elk
+  aangehouden asset (via het nieuwe `CoinbaseClient.get_all_balances()`),
+  gewaardeerd tegen de `<ASSET>-USDC`-feature packs die diezelfde cyclus al
+  zijn opgehaald. Een asset zonder feature pack die cyclus telt voor **0**
+  mee in plaats van geraden te worden — dit kan de portfolio-waarde alleen
+  onderschatten, nooit overschatten, dus het blijft aan de veilige kant.
+- `MIN_POSITION_PCT_OF_PORTFOLIO`/`MAX_POSITION_PCT_OF_PORTFOLIO` (standaard
+  `0.10`/`0.20`, dus 10%–20%) bepalen welk deel van die portfolio-waarde als
+  nieuwe BUY-orderomvang mag worden ingezet.
+- Binnen die bandbreedte bepaalt dezelfde kwaliteitsscore als voorheen
+  (confidence, edge, reward/fee, reward/risk, orderbook, spread, setup,
+  trend, support/resistance, regime en learning-signalen) waar in de band
+  de order precies valt — een sterke setup dicht bij het maximum, een
+  marginale setup dicht bij het minimum. De gewichten van die score zijn
+  ongewijzigd; ze worden nu gelezen als fractie (0..1) van de geconfigureerde
+  bandbreedte in plaats van als vaste USDC-bedragen.
+- Zolang de portfolio nog niet geprijsd is (bijv. direct na opstarten, of
+  een mislukte Coinbase-balansaanroep), valt de bot terug op de vaste
+  `MIN_DYNAMIC_ENTRY_QUOTE_USDC`/`MAX_DYNAMIC_ENTRY_QUOTE_USDC` (standaard
+  50–100 USDC), zodat er nooit stilzwijgend op een onbekende of nul-waarde
+  wordt gesized.
+- Elke live cyclus worden **tien** velden op `cfg` mee-bijgewerkt naar
+  dezelfde portfolio-percentage-waarden: `MIN_LIVE_ORDER_QUOTE_USDC`/
+  `MAX_LIVE_ORDER_QUOTE_USDC`, de C.4.3/autonomous-caps
+  (`PHASE_C_MAX_ORDER_QUOTE`, `AUTONOMOUS_MAX_ORDER_QUOTE`), `MAX_NOTIONAL_USD`,
+  `DEFAULT_QUOTE_SIZE_USDC`, en de exit-caps `PHASE_D3_MAX_EXIT_ORDER_QUOTE`/
+  `CONTROLLED_STOP_EXIT_MAX_QUOTE_USD` — inclusief de D.3-exit-vloer én
+  -plafond, zodat een groter account automatisch een grotere exit-onder- én
+  bovengrens krijgt, en een stop-loss op een grotere positie niet meer kan
+  worden geblokkeerd door een verouderd vast bedrag.
+- Er is geen hardcoded absoluut dollarplafond meer op entries of exits: de
+  vroegere `MAX_LIVE_ORDER_QUOTE_USDC=100`/`MAX_LIVE_EXIT_ORDER_QUOTE_USDC=120`-
+  clamps in `bot/live_order_size_policy.py`, `phase_c43_autonomous_entry_live.py`
+  en `phase_d3_controlled_live_exits.py` zijn verwijderd — die constanten
+  dienen alleen nog als fallback-default zolang `cfg` geen waarde heeft (vóór
+  de eerste cyclus). 10–20% van het portfolio is dus de enige echte grens.
+- Bekijk de geprijsde portfolio-waarde en de daaruit afgeleide caps per
+  cyclus in `state/portfolio_value.jsonl`.
+
+Relevante `.env`-variabelen (zie ook [`.env.example`](.env.example)):
+
+| Variabele | Standaard | Betekenis |
+|---|---|---|
+| `MIN_POSITION_PCT_OF_PORTFOLIO` | `0.10` | Ondergrens van een nieuwe BUY-entry, als fractie (10%) van de totale portfolio-waarde. |
+| `MAX_POSITION_PCT_OF_PORTFOLIO` | `0.20` | Bovengrens van een nieuwe BUY-entry, als fractie (20%) van de totale portfolio-waarde. |
+| `MIN_DYNAMIC_ENTRY_QUOTE_USDC` | `50.00` | Vaste USDC-fallback-ondergrens, alleen gebruikt zolang portfolio-pricing nog niet is gelukt. |
+| `MAX_DYNAMIC_ENTRY_QUOTE_USDC` | `100.00` | Vaste USDC-fallback-bovengrens, alleen gebruikt zolang portfolio-pricing nog niet is gelukt. |
+| `MIN_LIVE_ORDER_QUOTE_USDC` / `MAX_LIVE_ORDER_QUOTE_USDC` | `50.00` / `100.00` | Startup-waarden; worden elke live cyclus overschreven naar de actuele portfolio-percentage-caps (geen hardcoded plafond meer). |
+| `MAX_NOTIONAL_USD` | `100.00` | Startup-waarde; wordt elke live cyclus overschreven. Voorheen bleef dit vast en blokkeerde `amount_cap_guard.py` elke BUY boven 100 USDC, ook nadat de portfolio-cap hoger lag. |
+| `PHASE_D3_MAX_EXIT_ORDER_QUOTE` / `CONTROLLED_STOP_EXIT_MAX_QUOTE_USD` | `120.00` / `120.00` | Startup-waarden voor de full-close- resp. stop-loss-exitcap; worden elke live cyclus overschreven zodat een grotere positie ook volledig (en met een werkende stop-loss) gesloten kan worden. |
 
 ### Orders monitoren (lifecycle-bewaking)
 
@@ -425,11 +510,31 @@ zelf nog geen enkele order. Het plan bevat:
   winst);
 - trailing-activatieprijs en trailing-afstand (input voor D.4, zie verder);
 - een tijdslimiet voor de positie;
+- een minimum-stopafstand (`STOP_DISTANCE_PCT`, standaard 2%): als de
+  LLM-judge een stop teruggeeft die dichter op de entry ligt dan deze vloer,
+  verbreedt `_derive_entry_protective_levels()`
+  (`bot/phase_c43_autonomous_entry_live.py`) de stop automatisch naar de
+  vloer — nooit strakker, nooit een reject van de trade, puur een
+  deterministische veiligheidsmarge ná wat de LLM voorstelde;
 - een fee-bewuste minimum-netto-edge-check, zodat een plan niet wordt
   uitgevoerd als de verwachte winst de fees niet eens dekt;
 - een harde regel: **geen averaging down**;
 - coherentie tussen plan, positie en een unieke fingerprint, zodat een
   verlopen of inconsistent plan niet per ongeluk wordt uitgevoerd.
+
+Het exit-doel (`exit_target_source_policy.py`) kiest, in prioritievolgorde:
+een expliciete marktcontext-/GPT-target, live 1h-support/resistance
+(`build_d2_exit_market_context()`, hergebruikt dezelfde
+`MarketDataService.build_feature_pack()` die ook de entry-kant al gebruikt),
+het trade-plan-doel, de positie's eigen TP-velden, of tot slot een vaste
+risk/reward-vuistregel. Marktcontext wordt alleen doorgegeven wanneer er al
+een live Coinbase-client beschikbaar is (dezelfde bestaande poll-toestemming
+als de rest van deze fase — geen nieuwe autorisatie); ontbreekt of mislukt
+die, dan valt het systeem net zo veilig terug als voorheen. Zodra een positie
+gevuld is, blijft de lifecycle-service dit ook op elke volgende cyclus
+opnieuw proberen zolang er nog geen `D2_PLAN_STATUS_READY`-plan is opgeslagen
+— eerder stopte dit voorgoed zodra de bijbehorende entry-order niet meer
+lokaal "open" was, ook als het plan zelf nooit geslaagd was.
 
 ### Exitstrategie en het plaatsen van verkooporders (D.3)
 
@@ -468,6 +573,37 @@ naar een daadwerkelijke, gecontroleerde spot-SELL:
   `tools/show_phase_d3_open_exit_monitor.py`,
   `tools/show_phase_d3_live_exit_order_snapshot.py`,
   `tools/show_phase_d3_open_exit_order_governance.py`.
+
+### Noodstop-exit (Mode B, `bot/controlled_stop_market_exit_plan.py`)
+
+Naast de normale D.3-route (post-only limit SELL, geduldig) heeft de bot een
+**apart, strenger gegate pad** voor het moment dat een positie haar stop/
+invalidatie-niveau breekt: een **near-market limit-IOC** (immediate-or-
+cancel) SELL via `sor_limit_ioc`, zodat er nooit een resting order achterblijft
+die niet meteen vult. Dit pad activeert alleen als **alle** onderstaande
+voorwaarden tegelijk waar zijn (Mode A, preview-only, blijft anders de
+default):
+
+- `ENABLE_CONTROLLED_STOP_MARKET_EXITS`,
+  `ENABLE_AUTONOMOUS_STOP_EXIT_CANCEL`, `ENABLE_AUTONOMOUS_STOP_EXIT_SUBMIT`
+  en `ENABLE_AUTONOMOUS_STOP_EXIT_APPLY` staan alle vier op `true`;
+- een exacte `MODE_B_CONTROLLED_STOP_EXIT_ACK`-string in `.env`;
+- een daadwerkelijk gedetecteerde stop-breach op de positie zelf.
+
+De volgorde is altijd: eerst een eventuele bestaande take-profit-order
+cancellen en die cancel bevestigen, dán pas de IOC-verkooporder voorbereiden
+en versturen, en pas na bevestigd fill-bewijs de lokale positie sluiten.
+Prijs en hoeveelheid worden afgerond op de echte Coinbase-productprecisie
+vóór verzending, en een fill-verificatie na het versturen doet een korte
+retry (i.p.v. één enkele meting) omdat een net gevulde order soms nog
+kortstondig `OPEN` teruggeeft voordat de matching engine dat heeft bijgewerkt.
+
+Dit pad werd op 2026-07-08 voor het eerst in productie geraakt door een echte
+stop-breach en onthulde daarbij vier samenhangende bugs (verkeerd
+Coinbase-API-veld, een crash op de echte orderrespons-vorm, ontbrekende
+prijsafronding, en een race condition in de fill-check) — alle vier gefixt en
+met regressietests afgedekt. Zie de git-historie rond die datum voor de
+volledige post-mortem.
 
 ### Trailing stoploss (D.4)
 
@@ -572,6 +708,21 @@ order:
   `prefer_no_trade` met een confidence-score). Dit model heeft **expliciet
   geen** execution-bevoegdheid (`execution_allowed=false` is een harde
   configuratie-check) en kan de judge of D.2/D.3 niet blokkeren of forceren.
+  Let op: dit trainingsbestand wordt niet automatisch ververst (alleen via
+  het losse `tools/train_neural_shadow_policy.py`) — met te weinig recente
+  of te eenzijdige samples valt het terug op één enkele, weinig informatieve
+  klasse, wat de code zelf al signaleert (`one_class_dataset_warning`).
+- **GrowBot/River leert alleen van wat er daadwerkelijk in
+  `logs/trade_reflections.jsonl` terechtkomt** — sluit je een positie ooit
+  buiten de normale D.2/D.3-flow om (bijv. een handmatige noodreconciliatie),
+  zorg dan dat je alsnog een reflectie voor die trade toevoegt, anders is die
+  trade voor het leersysteem onzichtbaar. De state-schema van deze laag
+  (`bot/growbot_river_learning_contract.py: ALLOWED_STATE_KEYS`) is bewust
+  klein en expliciet whitelisted, en groeit incrementeel: `adx_1h`
+  (trendsterkte/keuzigheid, los van `trend_strength` dat alleen
+  prijsverandering meet) is op 2026-07-08 toegevoegd na een verlies-post-mortem
+  waarbij precies dat signaal wél in de bull/bear-analyse zat maar nergens in
+  het leergeheugen — puur additief, geen enkele blokkade leest dit veld nog.
 
 ### Parameters aanpassen via GrowBot/River en de Autonomous Parameter Governor
 
@@ -612,14 +763,33 @@ ooit daadwerkelijk mag activeren, en dat nog altijd bounded:
   cancellen, vervangen of risk-gates overslaan.
 - Activatie kan alleen via een vaste **allowlist** van parameters (zoals
   `PHASE_D2_MIN_EXPECTED_NET_EDGE_PCT`, `MAX_SPREAD_PCT`,
-  `EXIT_TARGET_MAX_DISTANCE_FROM_MID_PCT`) — execution-mode-vlaggen,
-  Coinbase-credentials, oversell-guards en andere kritieke instellingen staan
-  expliciet op de **forbidden**-lijst en zijn nooit autonoom aanpasbaar.
+  `EXIT_TARGET_MAX_DISTANCE_FROM_MID_PCT`, `STOP_DISTANCE_PCT`) — dit zijn
+  uitsluitend risico/exit-*definitie*-parameters (spread-limiet, minimale
+  edge/reward-ratio's, stop- en exit-afstand). Sizing/exposure-parameters
+  (ordergrootte, max open posities, max orders) zijn hier bewust **niet**
+  onderdeel van en blijven altijd handmatig via een operator-goedgekeurd
+  profiel; execution-mode-vlaggen, Coinbase-credentials, oversell-guards en
+  andere kritieke instellingen staan expliciet op de **forbidden**-lijst en
+  zijn nooit autonoom aanpasbaar.
 - Activatie wordt geblokkeerd zodra er open orders, open posities of een
   actieve lifecycle-fout zijn.
 - Standaard maximaal **1 parameterwijziging per 24 uur**, maximaal 1
   parameter per activatie, en altijd met een backup van het bestaande
-  `state/approved_parameter_profile.json` plus een rollback-plan vooraf.
+  `state/approved_parameter_profile.json` plus een rollback-plan vooraf. Een
+  toegepaste wijziging sluit zichzelf pas automatisch af (en laat de
+  volgende toe) zodra deze cooldown-periode is verstreken **en** er sindsdien
+  geen fouten zijn waargenomen (`evaluate_pending_activation()` in
+  `bot/autonomous_parameter_governor.py`) — zonder deze stap zou de governor
+  na de allereerste toepassing voorgoed vastlopen.
+- De governor-runs zijn beschermd door een lockbestand
+  (`state/reflection_adaptive_governor.lock`). Sinds 2026-07-08 wordt een lock
+  niet meer alleen op leeftijd als verlopen beschouwd, maar controleert
+  `acquire_governor_lock()` ook of het PID van de lockhouder nog leeft
+  (`os.kill(pid, 0)`): een verweesd lock van een gecrasht/afgesloten proces
+  wordt direct opgeruimd (`stale_reason: dead_pid`) in plaats van tot twee uur
+  álle governor-runs — inclusief de cooldown-evaluatie hierboven — te
+  blokkeren. Een hergebruikt PID leest als "leeft nog" (de veilige kant: het
+  lock wordt dan niet gestolen).
 - Drie modi: `report_only` (alleen rapporteren, default), `prepare_only`
   (alleen een pending-plan schrijven) en `apply_when_safe` (mag pas echt
   toepassen als **alle** gates — candidate, hash, cooldown, open-order/
@@ -627,6 +797,14 @@ ooit daadwerkelijk mag activeren, en dat nog altijd bounded:
 - Zelfs in `apply_when_safe`-modus is een losse, exacte ACK-string in `.env`
   vereist (`AUTONOMOUS_PARAMETER_GOVERNOR_ACK`), en een aparte ACK voor
   rollback.
+- De governor werkt `state/approved_parameter_profile.json` bij zodra hij een
+  wijziging toepast, maar synchroniseert bewust **nooit** zelf de bijbehorende
+  `APPROVED_PARAMETER_PROFILE_HASH` in `.env` — die hash vertegenwoordigt een
+  mens die de wijziging goedkeurt, niet de governor zelf. Loop je hierdoor
+  een keer op een hash-mismatch, dan valt de bot sinds 2026-07-08 gewoon
+  terug op de kale `.env`-waarden in plaats van te crashen bij opstarten
+  (`bot/approved_parameter_profile.py`); bekijk het voorgestelde profiel en
+  werk de hash pas bij nadat je de wijziging zelf hebt beoordeeld.
 
 Operator-commando's om dit zelf te volgen, allemaal read-only of dry-run
 zonder `--apply`:
@@ -638,10 +816,92 @@ PYTHONPATH=. python3 tools/show_growbot_river_governor_bridge_status.py --json
 PYTHONPATH=. python3 tools/show_autonomous_parameter_governor_status.py --json
 ```
 
+### Correctie- en hardeningpass (2026-07-08)
+
+Een reeks interne bugfixes na een volledige pijplijn-audit. Ze veranderen géén
+van de gedocumenteerde gedragingen hierboven; de **percentage-van-portfolio
+sizing blijft volledig ongewijzigd** (`bot/dynamic_entry_sizing.py`,
+`StrategyEngine._apply_portfolio_based_entry_sizing`/`_compute_portfolio_value_usdc`
+en de `*_PCT_OF_PORTFOLIO`-config zijn niet aangeraakt).
+
+- **Trade-plan-validatie** (`bot/trade_planner.py::is_valid_entry_trade_plan`):
+  `take_profit_1` en `do_not_chase_above` zijn niet langer hard verplicht. De
+  planner-prompt staat deze velden expliciet toe op `null`; een resting-limit
+  BUY vult nooit slechter dan zijn limietprijs (dus een ontbrekend
+  chase-plafond is geen kapitaalrisico) en winst-targets worden door de
+  exit-/trailing-laag beheerd, niet door TP1. Dit voorkomt dat overigens
+  geldige plannen stilzwijgend werden afgekeurd (dezelfde bugklasse als de
+  eerdere `valid_trade_plan`-regressie).
+- **Setup-type-classificatie** (`bot/strategy_engine.py::_normalize_setup_type`):
+  `breakout_retest`, `support_sweep_reclaim`, `failed_breakout` en `range_trade`
+  werden eerder allemaal naar `unclear` gebucketd en kregen daardoor de kleinste
+  vaste sizing-cap (60 USDC). Ze mappen nu naar hun juiste tier. Dit raakt
+  uitsluitend de secundaire, vaste-USDC-clamp `_clamp_judge_buy_size_quote`
+  (één `min(...)`-term náást de portfolio-caps), **niet** de
+  percentage-van-portfolio-sizing zelf.
+- **Positiebewaking-prompt** (`bot/prompts.py`): de toegestane
+  `position_watch`-beslissingen in de prompt zijn gelijkgetrokken met de parser
+  en escalatielogica (`hold_ok` / `watch_closer` / `tighten_risk` /
+  `escalate_full_review`), zodat het model geen tegenstrijdige lijst meer
+  krijgt.
+- **Indicatoren** (`bot/indicators.py`): RSI geeft nu de canonieke waarde 100
+  (in plaats van `NaN`) op een venster zonder verliezen, en de ADX-berekening
+  maskeert `-DM` tegen de ruwe `+DM` in plaats van tegen de al-genulde waarde.
+- **Learning-hygiëne** (`bot/execution_outcome_tracker.py`): de opgeslagen
+  `market_regime`-waarde wordt defensief genormaliseerd, zodat een niet-string
+  upstream-waarde nooit een vervormd label in `state/decision_outcomes.json`
+  kan lekken.
+- **Neurale shadow-features** (`bot/neural_feature_schema.py`): vijf features
+  (`rsi_15m`/`rsi_1h`/`adx_1h`/`ema_4h_alignment`/`ema_1d_alignment`) lazen
+  verkeerde sleutelpaden en werden stil `0.0`. Ze lezen nu de echte feature-pack
+  keys (`indicators.<tf>.rsi_14`/`adx_14`) resp. leiden de klassieke 50/200-EMA-
+  alignment af uit `ema_50`/`ema_200`. Dit verbetert alleen de trainingsdata van
+  de **shadow-only** neurale laag (`execution_allowed=False`, geen orderbevoegd-
+  heid); de live beslissing verandert er niet door.
+- **Judge-observability** (`bot/strategy_engine.py::_normalize_judge_payload`):
+  de final judge produceert enkele extra velden (`setup_quality_score`,
+  `trigger_readiness`, `recommended_entry_type`, `entry_reason`, e.a.) die eerder
+  werden weggegooid. Ze worden nu bewaard zodat ze zichtbaar zijn in logs/analyse.
+  Uitsluitend velden die door géén enkele gate of prijsberekening worden gelezen
+  zijn toegevoegd — het handelsgedrag blijft byte-identiek. Prijs-/risico-velden
+  die de planner zouden overschrijven of de approve/wait-drempel zouden verschuiven
+  (`preferred_limit_price`, `invalidation_price`, `do_not_chase_above`,
+  `entry_zone_*`, `target_price_*`, `cancel_if_price_*`, `support_level`) zijn
+  bewust **niet** toegevoegd.
+
+### Parameter-profile hash-pin drift (2026-07-06 t/m 2026-07-09)
+
+De `approved_parameter_profile`-laag (`bot/approved_parameter_profile.py`)
+vergelijkt bij elke config-load de sha256 van
+`state/approved_parameter_profile.json` met een in `.env` vastgepinde
+`APPROVED_PARAMETER_PROFILE_HASH` — die pin staat voor een expliciete
+menselijke goedkeuring van een governor-voorstel. Op 2026-07-06 schreef de
+`autonomous_parameter_governor` een nieuw profiel weg zonder dat de pin werd
+bijgewerkt (dat gebeurt bewust nooit automatisch), waardoor elke load vanaf
+dat moment werd afgewezen (`hash mismatch`).
+
+Dat faalt op zichzelf veilig: bij afwijzing valt config-constructie terug op
+de kale `.env`-defaults in plaats van te crashen. Dat is zelf ook een fix uit
+dezelfde hardeningpas — een eerdere versie liet een afgewezen profiel de hele
+`BotConfig()`-constructie laten crashen, wat op 2026-07-08 bijdroeg aan een
+stop-breached positie die urenlang zonder monitoring bleef doordat elke
+herstart daarna in een crash-loop liep. Maar de drift betekende ook dat elke
+governor-tuning sinds 6 juli drie dagen lang nooit live werd toegepast — de
+bot draaide stilzwijgend op statische `.env`-waarden in plaats van het
+goedgekeurde profiel.
+
+Op 2026-07-09 is de pin herbevestigd tegen het huidige profiel
+(`fee_aware_default_quote_50_bounded_v1`, sha256 `d22890f2…`). Praktisch
+verschil met de eerdere fallback: alleen `PHASE_D2_MIN_EXPECTED_NET_EDGE_PCT`
+verschoof van `0.0125` naar `0.01160458`; de overige elf sizing/risk-
+parameters waren al identiek.
+
 ## GrowBot/River autonomous parameter tuning
 
 - De GrowBot/River learning-laag is actief: het sidecar-systeem (bot/growbot_river_learning_contract.py, bot/river_online_parameter_learner.py) leert continu uit lokale logs/outcomes en stelt report-only parametervoorstellen voor.
-- Daar bovenop is een **fast-start-autotune** tier toegevoegd: een lager-volume readiness-laag voor kleine, omkeerbare D2-parameterstappen, naast de strikte stabilization-route (80%/80% coverage). Zie [`docs/GROWBOT_RIVER_LEARNING_INTEGRATION.md`](docs/GROWBOT_RIVER_LEARNING_INTEGRATION.md) voor de exacte criteria en allowlist.
+- Daar bovenop is een **fast-start-autotune** tier toegevoegd: een lager-volume readiness-laag voor kleine, omkeerbare D2-parameterstappen, naast de strikte stabilization-route (80%/80% coverage). Zie [`docs/GROWBOT_RIVER_LEARNING_INTEGRATION.md`](docs/GROWBOT_RIVER_LEARNING_INTEGRATION.md) voor de exacte criteria en allowlist. Vandaag op deze fast-start-lijst: `PHASE_D2_MIN_EXPECTED_NET_EDGE_PCT`, `PHASE_D2_MIN_REWARD_TO_FEE_RATIO`, `PHASE_D2_MIN_REWARD_TO_RISK_RATIO`, `MAX_SPREAD_PCT`, `EXIT_TARGET_MAX_DISTANCE_FROM_MID_PCT` en `STOP_DISTANCE_PCT`.
+- `STOP_DISTANCE_PCT` (minimum stopafstand) is deze sessie van een niet-actieve registry-placeholder naar een echt, live afgedwongen én leerbaar parameter gemaakt: `bot/growbot_learning_adapter.py` herkent nu wanneer een positie werd gestopt terwijl de koers nadien alsnog gunstig bewoog (`false_positive_plan` + `mfe_pct >= 1%`) als bewijs om de stopafstand te verruimen — bovenop het bestaande signaal om te verkrappen na een diepe drawdown.
+- **Trailing stoploss-parameters** (`PHASE_D2_DEFAULT_TRAILING_ACTIVATION_PCT`/`_DISTANCE_PCT`) worden wél door `BotConfig` gelezen, maar sturen alleen het D.2-previewveld `trailing` aan — de daadwerkelijke trailing-berekening in `bot/position_manager.py` gebruikt eigen, hardgecodeerde per-setup-standaarden en kent geen `cfg` door. Beide parameters staan (nog) niet op de governor-/approved-profile-/fast-start-allowlists en hebben geen GrowBot/River-bewijs — een vergelijkbaar gat als `STOP_DISTANCE_PCT` vóór deze sessie, nog niet gedicht.
 - `bot/growbot_river_readiness.py` rapporteert nu exact welke `stabilization_ready`-blockers *echt* zijn (`real_blockers`/`real_blockers_summary`) versus welke alleen een permanente, niet-blokkerende upstream-status melden. Zodra de River-sidecar beschikbaar is (`river_available=true`) verdwijnt `growbot_upstream_learning_runtime_unavailable` uit de actieve blockers en verschijnt het uitsluitend nog als `historical_readiness_labels`-item (`status: historical_stale_label_not_an_active_blocker`) — het reflecteert alleen de permanente GrowBot-upstream licentie/runtime-status, niet of de bot zelf kan leren. Op dit moment zijn `feature_snapshot_coverage_below_80pct` en `market_regime_coverage_below_80pct` de enige echte blockers, en die zijn `awaiting_live_episode_volume`: ze lossen automatisch op met meer live episodes, zonder code- of operatoractie.
 - Elke parameterwijziging loopt uitsluitend via de bestaande, ongewijzigde route: `GrowBot/River proposal → parameter_candidate_analysis → autonomous_parameter_governor → approved_parameter_profile → BotConfig`. Er is geen parallelle apply-route en geen directe `.env`-mutatie door deze laag.
 - `state/approved_parameter_profile.json` wordt pas door `BotConfig` geaccepteerd als de lokale `.env`-variabele `APPROVED_PARAMETER_PROFILE_HASH` exact overeenkomt met de SHA-256 van dat bestand — dit is een bewuste, losse goedkeuringsstap die altijd lokaal en handmatig blijft.
@@ -677,6 +937,16 @@ status scripts and report/state files, and has no code path that can write `.env
 mutate state, call Coinbase, or restart anything. See
 [`dashboard/README.md`](dashboard/README.md) for setup, run commands, and the full
 security notes.
+
+The dashboard never imports `bot/config.py` or reads `.env` directly (see
+`dashboard/backend/config.py`); to still know which tickers the running bot
+actually follows, `run_trader_loop.py` publishes a small, secret-free
+`state/runtime_ticker_universe.json` at startup. Positions, the opportunity
+radar and the trade-thesis view use it to hide closed/historical entries for
+tickers no longer in `ALLOWED_TICKERS` (e.g. after narrowing the ticker list) —
+an open position always stays visible regardless, since it still needs
+monitoring/exit. The Overview page shows the currently tracked tickers as
+badges, sourced from `/api/status/tickers`.
 
 ## Testing
 

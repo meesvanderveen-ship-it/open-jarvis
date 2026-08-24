@@ -525,14 +525,17 @@ def is_valid_entry_trade_plan(plan: Dict[str, Any]) -> bool:
     # Advisory fields (risk_notes, why_plan_is_valid, why_size_is_small, planner_blockers,
     # must_not_trade_if) are intentionally excluded — an empty planner_blockers list means
     # no blockers (a clean plan), and advisory text fields may be omitted by the LLM.
+    # do_not_chase_above and take_profit_1 are ALSO excluded on purpose: TRADE_PLANNER_PROMPT
+    # explicitly allows numeric fields other than max_size_quote/confidence to be null.
+    # A resting-limit BUY never fills worse than its limit, so a missing chase-ceiling is not
+    # a capital-risk gap, and profit targets are managed by the exit/trailing layer, not TP1.
+    # Requiring them here (the pre-f13e1f7 bug class) silently rejected otherwise-valid plans.
     for key in (
         "entry_zone_low",
         "entry_zone_high",
         "trigger_price",
-        "do_not_chase_above",
         "invalidation_price",
         "stop_loss_price",
-        "take_profit_1",
         "max_quote_size",
         "planner_confidence",
     ):

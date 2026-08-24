@@ -50,13 +50,25 @@ def test_profile_disabled_skips_without_reading_missing_file(tmp_path: Path, cap
 
 
 def test_hash_mismatch_rejected(tmp_path: Path) -> None:
+    # A rejection must never raise: BotConfig() calls this unguarded in
+    # __post_init__, so an uncaught exception here takes down the whole bot
+    # (including live position monitoring/exits) over an optional, whitelisted
+    # profile layer that already has working .env fallback values. Confirmed
+    # live 2026-07-08: the autonomous_parameter_governor updated the profile
+    # without anyone syncing .env's pinned hash (nothing does that
+    # automatically -- that hash is supposed to represent a human approving
+    # the governor's own proposed change), and the very next unrelated
+    # restart crash-looped indefinitely instead of just running on baseline
+    # .env values, leaving an open, stop-breached position unmonitored.
     path = _write_profile(tmp_path, {"MAX_SPREAD_PCT": "0.0100"})
     env = _base_env({
         "ENABLE_APPROVED_PARAMETER_PROFILE": "true",
         "APPROVED_PARAMETER_PROFILE_HASH": "0" * 64,
     })
-    with pytest.raises(ValueError, match="mismatch"):
-        load_approved_parameter_profile(path=path, env=env)
+    result = load_approved_parameter_profile(path=path, env=env)
+    assert result.status == "rejected"
+    assert result.reason == "hash_mismatch"
+    assert result.values == {}
 
 
 def test_unknown_key_rejected(tmp_path: Path) -> None:
@@ -65,8 +77,28 @@ def test_unknown_key_rejected(tmp_path: Path) -> None:
         "ENABLE_APPROVED_PARAMETER_PROFILE": "true",
         "APPROVED_PARAMETER_PROFILE_HASH": sha256_file(path),
     })
-    with pytest.raises(ValueError, match="niet-whitelisted"):
-        load_approved_parameter_profile(path=path, env=env)
+    result = load_approved_parameter_profile(path=path, env=env)
+    assert result.status == "rejected"
+    assert result.reason.startswith("unknown_keys:")
+    assert "ENABLE_LIVE_EXIT_ORDERS" in result.reason
+    assert result.values == {}
+
+
+def test_config_falls_back_gracefully_instead_of_crashing_on_rejected_profile(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The critical end-to-end guarantee: BotConfig() itself must not raise when
+    # the profile is rejected -- it must silently fall back to plain .env
+    # values, exactly like it does for the "disabled" case.
+    path = _write_profile(tmp_path, {"MAX_SPREAD_PCT": "0.0100"})
+    monkeypatch.chdir(tmp_path)
+    env = _base_env({
+        "ENABLE_APPROVED_PARAMETER_PROFILE": "true",
+        "APPROVED_PARAMETER_PROFILE_HASH": "0" * 64,
+        "MAX_SPREAD_PCT": "0.0060",
+    })
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    cfg = BotConfig()
+    assert str(cfg.max_spread_pct) == "0.0060"
 
 
 def test_allowed_profile_loaded_and_applied_to_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -88,6 +120,7 @@ def test_allowed_profile_loaded_and_applied_to_config(tmp_path: Path, monkeypatc
                 "PHASE_D2_MIN_EXPECTED_NET_EDGE_PCT": "0.0150",
                 "PHASE_D2_MIN_REWARD_TO_FEE_RATIO": "4.0",
                 "PHASE_D2_MIN_REWARD_TO_RISK_RATIO": "2.0",
+                "STOP_DISTANCE_PCT": "0.0250",
             }
         },
     )
@@ -104,6 +137,7 @@ def test_allowed_profile_loaded_and_applied_to_config(tmp_path: Path, monkeypatc
     assert cfg.autonomous_max_order_quote == Decimal("80.00")
     assert cfg.autonomous_max_open_orders == 2
     assert cfg.phase_d2_min_reward_to_risk_ratio == Decimal("2.0")
+    assert cfg.stop_distance_pct == Decimal("0.0250")
     cfg.validate()
 
 

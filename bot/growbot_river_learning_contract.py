@@ -15,7 +15,7 @@ import math
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
 
-LEARNING_CONTEXT_SCHEMA_VERSION = "growbot_river_learning_context_v2"
+LEARNING_CONTEXT_SCHEMA_VERSION = "growbot_river_learning_context_v3"
 UNKNOWN_REGIME_VALUES = {"", "unknown", "none", "null", "n/a", "na"}
 ALLOWED_STATE_KEYS = (
     "confidence",
@@ -28,6 +28,20 @@ ALLOWED_STATE_KEYS = (
     "ticker_score",
     "volume_ratio",
     "trend_strength",
+    # trend_strength above is a price-change ratio (end-start)/start over the
+    # candle window -- it captures direction and magnitude of the move, but
+    # nothing about whether that move is part of a genuine trend or just chop
+    # (a market can have near-zero trend_strength while still being firmly
+    # directionless, or vice versa). adx_1h (Average Directional Index, 1h
+    # timeframe) fills that specific gap: it measures trend *conviction*
+    # independent of direction. Added 2026-07-08 after a live SOL-USDC loss
+    # review found this exact factor present (1h ADX ~10.9, i.e. a weak/
+    # choppy market) but untracked anywhere in the learning state -- the bear
+    # case at entry explicitly flagged it, but nothing fed it back into
+    # evidence that accumulates across trades. This is additive only: no
+    # gating logic reads it yet, it just becomes available for the online
+    # River model to weigh once enough episodes carry it.
+    "adx_1h",
     "liquidity_score",
     "orderbook_imbalance",
     "fee_pct",
@@ -35,6 +49,7 @@ ALLOWED_STATE_KEYS = (
     "mfe_pct",
     "mae_pct",
     "drawdown_pct",
+    "exit_efficiency_proxy",
 )
 REGIME_CONTEXT_KEYS = (
     "adaptive_market_regime",
@@ -107,6 +122,14 @@ def _first_text(sources: Sequence[Mapping[str, Any]], paths: Iterable[Sequence[s
                     node = None
                     break
                 node = node[key]
+            if isinstance(node, Mapping):
+                # The regime module (bot/strategy_engine.py's "regime" analysis
+                # step) returns a dict ({"regime_label", "regime_confidence",
+                # "regime_strength", ...}), not a plain string. Extract the
+                # label instead of stringifying the whole dict, which used to
+                # produce a garbled, useless tag like
+                # "{'regime_label':_'mixed',_'regime_confidence':_0.86,_...}".
+                node = node.get("regime_label")
             text = str(node or "").strip().lower().replace(" ", "_")
             if text and text not in UNKNOWN_REGIME_VALUES:
                 return text
@@ -318,6 +341,11 @@ def build_learning_context_snapshot(
         "ticker_score": (("ticker_score",), ("score",)),
         "volume_ratio": (("volume_ratio",), ("relative_volume",)),
         "trend_strength": (("trend_strength",),),
+        # Flat "adx_1h" first (already-normalized callers, e.g. neural_feature_schema
+        # samples), then the raw feature_pack's nested indicators.1h.adx_14 shape
+        # (bot/strategy_engine.py's actual live feature pack -- confirmed against
+        # logs/analysis.jsonl for the 2026-07-07 SOL-USDC entry).
+        "adx_1h": (("adx_1h",), ("indicators", "1h", "adx_14")),
         "liquidity_score": (("liquidity_score",),),
         "orderbook_imbalance": (("orderbook_imbalance",), ("imbalance",)),
         "fee_pct": (("fee_pct",), ("estimated_roundtrip_fee_pct",), ("roundtrip_fee_pct",)),

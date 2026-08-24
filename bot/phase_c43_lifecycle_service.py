@@ -7,6 +7,7 @@ from typing import Any, Dict, Optional
 from bot.order_store import OrderStore
 from bot.phase_c43_lifecycle_governance import build_phase_c43_lifecycle_governance_report
 from bot.phase_c43_lifecycle_orchestrator import build_phase_c43_lifecycle_orchestrator_report
+from bot.phase_d2_position_executor import D2_PLAN_STATUS_READY, load_position_executor_plans
 from bot.phase_d3_open_exit_lifecycle_manager import (
     build_phase_d3_open_exit_lifecycle_report,
     scan_open_d3_exit_lifecycle_orders,
@@ -127,12 +128,40 @@ def build_phase_c43_lifecycle_service_report(
     open_d3_exit_orders = _open_d3_exit_orders(store, ticker=ticker)
     governance_orders = open_c43_orders + open_d3_exit_orders
 
+    # D.2 is otherwise only ever attempted at the moment an entry order fills
+    # (via the affected_tickers branch below) -- once that order is no longer
+    # locally "open", this service stops calling the orchestrator for that
+    # ticker forever, even if the D.2 plan never persisted (e.g. blocked by
+    # the fee-edge gate). Retry it here for any open position that still has
+    # no ready, persisted plan, so a fix or a market move can actually take
+    # effect instead of the position sitting with a stale/blocked plan
+    # indefinitely.
+    open_c43_tickers = {str(o.get("ticker") or o.get("product_id") or "").strip().upper() for o in open_c43_orders}
+    requested_ticker = str(ticker or "").strip().upper()
+    persisted_plans = (load_position_executor_plans().get("plans") or {})
+    positions_needing_d2_retry = []
+    for pos_ticker, position in (state.get_positions() or {}).items():
+        if not isinstance(position, dict):
+            continue
+        norm_ticker = str(pos_ticker or "").strip().upper()
+        if str(position.get("status") or "").lower() != "open":
+            continue
+        if requested_ticker and norm_ticker != requested_ticker:
+            continue
+        if norm_ticker in open_c43_tickers:
+            continue
+        plan = persisted_plans.get(norm_ticker) or {}
+        if isinstance(plan, dict) and plan.get("status") == D2_PLAN_STATUS_READY:
+            continue
+        positions_needing_d2_retry.append(norm_ticker)
+
     governance = build_phase_c43_lifecycle_governance_report(
         cfg=cfg,
         local_open_c43_orders=governance_orders,
         ticker=ticker,
         cycle_type=cycle_type,
         source=source,
+        retry_position_count=len(positions_needing_d2_retry),
     )
     effective = governance.get("effective_flags") or {}
     allow_poll = bool(effective.get("allow_coinbase_poll", False))
@@ -142,8 +171,26 @@ def build_phase_c43_lifecycle_service_report(
     build_d3 = bool(effective.get("build_d3_preview", False))
 
     client = None
-    if allow_poll and (open_c43_orders or open_d3_exit_orders):
+    if allow_poll and (open_c43_orders or open_d3_exit_orders or positions_needing_d2_retry):
         client = coinbase_client if coinbase_client is not None else _build_coinbase_client()
+
+    d2_retry_orchestrator_reports = []
+    if build_d2 and positions_needing_d2_retry:
+        for retry_ticker in positions_needing_d2_retry:
+            d2_retry_orchestrator_reports.append(
+                build_phase_c43_lifecycle_orchestrator_report(
+                    cfg=cfg,
+                    ticker=retry_ticker,
+                    order_store=store,
+                    state_store=state,
+                    coinbase_client=client,
+                    allow_coinbase_poll=bool(client),
+                    apply_local=apply_local,
+                    build_d2_plan=build_d2,
+                    persist_d2_plan=persist_d2,
+                    build_d3_preview=build_d3,
+                )
+            )
 
     if open_c43_orders:
         report = build_phase_c43_lifecycle_orchestrator_report(
@@ -233,6 +280,8 @@ def build_phase_c43_lifecycle_service_report(
         "local_open_d3_exit_orders": [_order_identity(o) for o in open_d3_exit_orders[:20]],
         "coinbase_client_constructed": bool(client),
         "orchestrator_report": report,
+        "positions_needing_d2_retry": positions_needing_d2_retry,
+        "d2_retry_orchestrator_reports": d2_retry_orchestrator_reports,
         "d3_open_exit_lifecycle_reports": d3_reports,
         "d3_open_exit_lifecycle_errors": d3_errors,
         "summary": {

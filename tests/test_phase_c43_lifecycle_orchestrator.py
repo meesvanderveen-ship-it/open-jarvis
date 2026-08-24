@@ -198,6 +198,64 @@ def test_apply_filled_order_creates_position_d2_plan_and_d3_preview_without_sell
     assert report["c43_reconcile_report"]["mutation_lock"] == {"acquired": True, "reentrant": True}
 
 
+def test_d2_plan_uses_market_context_when_coinbase_client_provided(tmp_path: Path, monkeypatch):
+    class FakeMarketDataService:
+        def __init__(self, client):
+            self.client = client
+
+        def build_feature_pack(self, ticker):
+            return {"ticker": ticker, "structure": {"nearest_resistance": 55000, "nearest_support": 48000}}
+
+    monkeypatch.setattr("bot.market_data.MarketDataService", FakeMarketDataService)
+    store = _store_with_order(tmp_path)
+    state = FakeStateStore()
+    report = build_phase_c43_lifecycle_orchestrator_report(
+        cfg=_cfg(),
+        ticker="BTC-USDC",
+        order_store=store,
+        state_store=state,
+        coinbase_client=object(),
+        live_orders_snapshot=[{
+            "client_order_id": "phasec-BTCUSDC-test",
+            "order_id": "cb-order-1",
+            "product_id": "BTC-USDC",
+            "side": "BUY",
+            "status": "FILLED",
+            "filled_size": "0.0005",
+            "average_filled_price": "50000",
+        }],
+        apply_local=True,
+        build_d2_plan=True,
+    )
+    target_policy = report["d2_reports"][0]["plan"]["exit_target_source_policy"]
+    assert target_policy["target_source"] == "indicator_resistance_target"
+    assert target_policy["used_market_context"] is True
+
+
+def test_d2_plan_falls_back_without_coinbase_client(tmp_path: Path):
+    store = _store_with_order(tmp_path)
+    state = FakeStateStore()
+    report = build_phase_c43_lifecycle_orchestrator_report(
+        cfg=_cfg(),
+        ticker="BTC-USDC",
+        order_store=store,
+        state_store=state,
+        live_orders_snapshot=[{
+            "client_order_id": "phasec-BTCUSDC-test",
+            "order_id": "cb-order-1",
+            "product_id": "BTC-USDC",
+            "side": "BUY",
+            "status": "FILLED",
+            "filled_size": "0.0005",
+            "average_filled_price": "50000",
+        }],
+        apply_local=True,
+        build_d2_plan=True,
+    )
+    target_policy = report["d2_reports"][0]["plan"]["exit_target_source_policy"]
+    assert target_policy["used_market_context"] is False
+
+
 def test_apply_filled_order_without_d2_or_d3_build_keeps_default_order_metadata(tmp_path: Path):
     store = _store_with_order(tmp_path)
     state = FakeStateStore()

@@ -33,6 +33,26 @@ class NewsSentimentService:
         self.fng_enabled = self._get_bool_env("FNG_ENABLED", True)
         self.fng_url = os.getenv("FNG_API_URL", "https://api.alternative.me/fng/").strip()
 
+        # Free, no-API-key social proxy: public Reddit post listings (read-only,
+        # no OAuth). Deliberately separate from Santiment (bot/market_intelligence_context.py),
+        # which is the real on-chain/crowd data source but needs a paid API key
+        # that isn't configured. This is a lower-fidelity but zero-cost stand-in:
+        # real user posts/comments/upvotes on crypto subreddits, not another
+        # reading of the same RSS headlines (see news_momentum_score above).
+        self.social_enabled = self._get_bool_env("SOCIAL_ENABLED", True)
+        self.social_timeout = self._get_int_env("SOCIAL_TIMEOUT_SECONDS", 10)
+        self.social_lookback_hours = self._get_int_env("SOCIAL_LOOKBACK_HOURS", 24)
+        self.social_max_posts_per_sub = self._get_int_env("SOCIAL_MAX_POSTS_PER_SUB", 100)
+        self.social_max_top_posts = self._get_int_env("SOCIAL_MAX_TOP_POSTS", 5)
+        # Cache the raw subreddit listings for a few minutes so an 18-ticker
+        # scan doesn't refetch the same pages 18x/hour and trip Reddit's
+        # anti-bot rate limiting; only the per-ticker filtering happens fresh.
+        self.social_cache_minutes = self._get_int_env("SOCIAL_CACHE_MINUTES", 15)
+        default_subreddits = ["CryptoCurrency", "CryptoMarkets"]
+        raw_subreddits = os.getenv("SOCIAL_SUBREDDITS", ",".join(default_subreddits))
+        self.subreddits = [x.strip() for x in raw_subreddits.split(",") if x.strip()]
+        self._social_cache: Dict[str, Any] = {"fetched_at": None, "posts": []}
+
         self.session = requests.Session()
 
         default_feeds = [
@@ -408,13 +428,120 @@ class NewsSentimentService:
         except Exception:
             return {}
 
+    def _fetch_reddit_listing(self, subreddit: str) -> List[Dict[str, Any]]:
+        url = f"https://www.reddit.com/r/{subreddit}/new.json?limit={self.social_max_posts_per_sub}"
+        try:
+            r = self.session.get(
+                url,
+                timeout=self.social_timeout,
+                headers={"User-Agent": "coinbase-bot-social-scan/1.0 (read-only public listing fetch)"},
+            )
+            r.raise_for_status()
+            payload = r.json()
+        except Exception:
+            return []
+
+        out: List[Dict[str, Any]] = []
+        children = ((payload or {}).get("data") or {}).get("children") or []
+        for child in children:
+            post = (child or {}).get("data") or {}
+            created_utc = post.get("created_utc")
+            try:
+                created_dt = datetime.fromtimestamp(float(created_utc), tz=timezone.utc) if created_utc else None
+            except (TypeError, ValueError, OSError):
+                created_dt = None
+            if not self._within_social_lookback(created_dt):
+                continue
+            title = self._clean_text(str(post.get("title") or ""))
+            if not title:
+                continue
+            out.append({
+                "subreddit": subreddit,
+                "title": title,
+                "selftext": self._clean_text(str(post.get("selftext") or ""))[:300],
+                "created_at": created_dt.isoformat() if created_dt else "",
+                "upvotes": int(post.get("ups") or 0),
+                "num_comments": int(post.get("num_comments") or 0),
+                "permalink": self._clean_text(str(post.get("permalink") or "")),
+            })
+        return out
+
+    def _within_social_lookback(self, dt: Optional[datetime]) -> bool:
+        if dt is None:
+            return False
+        return dt >= (self._now_utc() - timedelta(hours=self.social_lookback_hours))
+
+    def _fetch_all_reddit_posts(self) -> List[Dict[str, Any]]:
+        cached_at = self._social_cache.get("fetched_at")
+        if cached_at is not None and (self._now_utc() - cached_at) < timedelta(minutes=self.social_cache_minutes):
+            return self._social_cache["posts"]
+
+        posts: List[Dict[str, Any]] = []
+        for subreddit in self.subreddits:
+            posts.extend(self._fetch_reddit_listing(subreddit))
+
+        self._social_cache = {"fetched_at": self._now_utc(), "posts": posts}
+        return posts
+
+    def build_social_pack(self, ticker: str) -> Dict[str, Any]:
+        if not self.social_enabled:
+            return {
+                "social_available": False,
+                "social_engagement_score": 0.50,
+                "social_post_count": 0,
+                "social_top_posts": [],
+                "social_sources": [],
+            }
+
+        all_posts = self._fetch_all_reddit_posts()
+        if not all_posts:
+            # Empty could mean "no chatter" or "Reddit fetch failed/blocked";
+            # do not claim availability when nothing at all came back for any
+            # subreddit, so callers/prompts don't read this as a real zero.
+            return {
+                "social_available": False,
+                "social_engagement_score": 0.50,
+                "social_post_count": 0,
+                "social_top_posts": [],
+                "social_sources": [f"reddit:{s}" for s in self.subreddits],
+            }
+
+        matched = [
+            post for post in all_posts
+            if self._matches_ticker(ticker, f"{post['title']} {post.get('selftext', '')}")
+        ]
+        matched.sort(key=lambda p: (p.get("upvotes", 0) + p.get("num_comments", 0)), reverse=True)
+
+        post_count = len(matched)
+        volume_component = min(1.0, post_count / 10.0)
+        engagement_total = sum(p.get("upvotes", 0) + p.get("num_comments", 0) for p in matched[:20])
+        engagement_component = min(1.0, engagement_total / 500.0)
+        social_engagement_score = round((volume_component * 0.5) + (engagement_component * 0.5), 4)
+
+        return {
+            "social_available": True,
+            "social_engagement_score": social_engagement_score,
+            "social_post_count": post_count,
+            "social_top_posts": [
+                {
+                    "subreddit": p["subreddit"],
+                    "title": p["title"],
+                    "upvotes": p.get("upvotes", 0),
+                    "num_comments": p.get("num_comments", 0),
+                    "created_at": p.get("created_at", ""),
+                }
+                for p in matched[: self.social_max_top_posts]
+            ],
+            "social_sources": [f"reddit:{s}" for s in self.subreddits],
+        }
+
     def build_sentiment_pack(self, ticker: str) -> Dict[str, Any]:
         if not self.enabled:
             return {
                 "news_summary_short": "News pipeline disabled.",
                 "event_risk_level": "low",
                 "sentiment_score": 0.50,
-                "social_momentum_score": 0.50,
+                "news_momentum_score": 0.50,
                 "narrative_tags": [],
                 "recent_headlines": [],
                 "fear_greed": {},
@@ -440,9 +567,15 @@ class NewsSentimentService:
         else:
             sentiment_score = round(sentiment_score, 4)
 
+        # Derived purely from this same RSS headline stream (volume + score
+        # intensity) -- NOT real social-platform data (no Twitter/Reddit/etc.
+        # feed exists here). Keep the name honest so it isn't mistaken for an
+        # independent corroborating signal alongside sentiment_score; see
+        # market_intelligence_context.py's santiment social_volume_spike for
+        # the real (currently disabled, no API key) social-data source.
         headline_intensity = min(1.0, len(ticker_items) / max(1, self.max_headlines))
         score_intensity = min(1.0, abs(avg_score) / 3.0)
-        social_momentum_score = round((headline_intensity * 0.55) + (score_intensity * 0.45), 4)
+        news_momentum_score = round((headline_intensity * 0.55) + (score_intensity * 0.45), 4)
 
         event_risk_level = self._event_risk_level(ticker_items)
         narrative_tags = self._narrative_tags(ticker_items)
@@ -452,7 +585,7 @@ class NewsSentimentService:
             "news_summary_short": summary,
             "event_risk_level": event_risk_level,
             "sentiment_score": sentiment_score,
-            "social_momentum_score": social_momentum_score,
+            "news_momentum_score": news_momentum_score,
             "narrative_tags": narrative_tags,
             "recent_headlines": self._summarize_headlines(ticker_items, self.max_headlines),
             "fear_greed": fng,

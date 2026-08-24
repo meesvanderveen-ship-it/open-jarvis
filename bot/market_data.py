@@ -455,6 +455,7 @@ class MarketDataService:
         structure = self._build_structure(df_1h, df_4h)
         technical_flags = self._build_technical_flags(df_15m, df_1h, df_4h, df_1d)
         sentiment = self.news.build_sentiment_pack(ticker)
+        social = self.news.build_social_pack(ticker)
         orderbook_context = self._build_orderbook_context(ticker, best_bid, best_ask, mid_price)
 
         bullish_evidence = [flag for flag in technical_flags if "above" in flag or "strong" in flag or "high" in flag]
@@ -548,14 +549,24 @@ class MarketDataService:
                 "news_summary_short": sentiment["news_summary_short"],
                 "event_risk_level": sentiment["event_risk_level"],
                 "sentiment_score": sentiment["sentiment_score"],
-                "social_momentum_score": sentiment["social_momentum_score"],
+                "news_momentum_score": sentiment["news_momentum_score"],
                 "narrative_tags": sentiment["narrative_tags"],
+                # Real Reddit chatter (see social_context for detail/sources),
+                # distinct from news_momentum_score which only re-measures the
+                # RSS headline stream above.
+                "social_engagement_score": social["social_engagement_score"],
+                "social_available": social["social_available"],
             },
             "news_context": {
                 "recent_headlines": sentiment["recent_headlines"],
                 "fear_greed": sentiment["fear_greed"],
                 "news_item_count": sentiment["news_item_count"],
                 "rss_sources": sentiment["rss_sources"],
+            },
+            "social_context": {
+                "social_post_count": social["social_post_count"],
+                "social_top_posts": social["social_top_posts"],
+                "social_sources": social["social_sources"],
             },
             "risk_context": {
                 "base_symbol": base_symbol,

@@ -14,6 +14,7 @@ from bot.phase_d3_controlled_live_exits import (
     build_phase_d3_controlled_live_exit_report,
     build_phase_d3_exit_payload,
     build_phase_d3_risk_close_exit_intent,
+    build_phase_d3_take_profit_resting_exit_intent,
     select_next_phase_d3_exit_intent,
     submit_phase_d3_controlled_exit,
 )
@@ -111,6 +112,117 @@ def test_d3_full_close_can_cover_a_110_usdc_position_without_old_buy_cap(monkeyp
     assert Decimal(intent["size_base"]) == Decimal("1.00")
     assert Decimal(intent["estimated_quote_value"]) == Decimal("110.01")
     assert not intent["blockers"]
+
+
+def test_d3_partial_reduce_intent_is_not_exempt_from_min_quote(monkeypatch, tmp_path):
+    # is_full_close=False (used for judge reduce_size, not a full close) must
+    # not inherit the full-close below-minimum exemption: a too-small partial
+    # sell should be blocked rather than silently allowed through.
+    cfg = _cfg(monkeypatch)
+    store = OrderStore(path=tmp_path / "orders.json", log_path=tmp_path / "events.jsonl")
+    position = _position(entry_price="100.00", position_size_base="1.00", bot_managed_base="1.00")
+    intent = build_phase_d3_full_close_exit_intent(
+        cfg=cfg,
+        ticker="BTC-USDC",
+        position=position,
+        order_store=store,
+        orderbook_context={"best_bid": "9.99", "best_ask": "10.00", "freshness_status": "fresh"},
+        exchange_rules={"base_increment": "0.00000001", "price_increment": "0.01", "quote_min_size": "1"},
+        requested_base_size="0.10",
+        label="PARTIAL_REDUCE",
+        market_evidence_price="10.00",
+        is_full_close=False,
+    )
+    assert "exit_quote_below_min_live_order_quote" in intent["blockers"]
+
+
+def test_d3_take_profit_resting_intent_prices_at_position_take_profit_not_market(monkeypatch, tmp_path):
+    # Distinct from build_phase_d3_full_close_exit_intent (prices at
+    # best_ask_plus_one_tick for an immediate discretionary exit): this rests
+    # a limit SELL at the position's own take_profit_price so a fast move
+    # through the target fills automatically between cycles.
+    cfg = _cfg(monkeypatch)
+    store = OrderStore(path=tmp_path / "orders.json", log_path=tmp_path / "events.jsonl")
+    position = _position(
+        entry_price="80.42",
+        position_size_base="0.76349166",
+        bot_managed_base="0.76349166",
+        stop_price="80.3229",
+        invalidation_price="79.98",
+        take_profit_price="81.300",
+    )
+    intent = build_phase_d3_take_profit_resting_exit_intent(
+        cfg=cfg,
+        ticker="SOL-USDC",
+        position=position,
+        order_store=store,
+        orderbook_context={"best_bid": "80.90", "best_ask": "80.95", "freshness_status": "fresh"},
+        exchange_rules={"base_increment": "0.00000001", "price_increment": "0.01", "quote_min_size": "1"},
+    )
+    assert not intent["blockers"]
+    assert intent["limit_price"] == "81.30"
+    assert Decimal(intent["size_base"]) == Decimal("0.76349166")
+    assert intent["label"] == "TP1"
+    assert intent["side"] == "SELL"
+
+
+def test_d3_take_profit_resting_intent_blocked_without_take_profit_price(monkeypatch, tmp_path):
+    cfg = _cfg(monkeypatch)
+    store = OrderStore(path=tmp_path / "orders.json", log_path=tmp_path / "events.jsonl")
+    position = _position(
+        entry_price="80.42",
+        position_size_base="0.76349166",
+        bot_managed_base="0.76349166",
+        stop_price="80.3229",
+        invalidation_price="79.98",
+        take_profit_price="0",
+    )
+    intent = build_phase_d3_take_profit_resting_exit_intent(
+        cfg=cfg,
+        ticker="SOL-USDC",
+        position=position,
+        order_store=store,
+        orderbook_context={"best_bid": "80.90", "best_ask": "80.95", "freshness_status": "fresh"},
+        exchange_rules={"base_increment": "0.00000001", "price_increment": "0.01", "quote_min_size": "1"},
+    )
+    assert "take_profit_price_missing_for_resting_tp_exit" in intent["blockers"]
+
+
+def test_d3_take_profit_resting_intent_blocks_duplicate_label(monkeypatch, tmp_path):
+    cfg = _cfg(monkeypatch)
+    store = OrderStore(path=tmp_path / "orders.json", log_path=tmp_path / "events.jsonl")
+    position = _position(
+        order_id="pos-1",
+        entry_price="80.42",
+        position_size_base="0.76349166",
+        bot_managed_base="0.76349166",
+        stop_price="80.3229",
+        invalidation_price="79.98",
+        take_profit_price="81.300",
+    )
+    store.upsert_order({
+        "client_order_id": "phased3-SOLUSDC-TP1-pos-1-existing",
+        "exchange_order_id": "exchange-phased3-SOLUSDC-TP1-pos-1-existing",
+        "ticker": "SOL-USDC",
+        "side": "SELL",
+        "status": "submitted",
+        "phase": "D3_controlled_live_reduce_only_exits",
+        "linked_position_id": "pos-1",
+        "size_base": "0.76349166",
+        "remaining_size": "0.76349166",
+        "limit_price": "81.30",
+        "execution_action": "place_limit_sell",
+        "d3_exit_label": "TP1",
+    })
+    intent = build_phase_d3_take_profit_resting_exit_intent(
+        cfg=cfg,
+        ticker="SOL-USDC",
+        position=position,
+        order_store=store,
+        orderbook_context={"best_bid": "80.90", "best_ask": "80.95", "freshness_status": "fresh"},
+        exchange_rules={"base_increment": "0.00000001", "price_increment": "0.01", "quote_min_size": "1"},
+    )
+    assert "duplicate_exit_label_already_open_for_position" in intent["blockers"]
 
 
 def test_d3_risk_close_is_blocked_from_post_only_maker_limit_route(monkeypatch, tmp_path):

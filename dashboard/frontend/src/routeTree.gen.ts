@@ -11,11 +11,13 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as AuthenticatedRouteRouteImport } from './routes/_authenticated/route'
 import { Route as AuthenticatedIndexRouteImport } from './routes/_authenticated/index'
+import { Route as AuthenticatedThesisRouteImport } from './routes/_authenticated/thesis'
 import { Route as AuthenticatedSimulationRouteImport } from './routes/_authenticated/simulation'
 import { Route as AuthenticatedRiskRouteImport } from './routes/_authenticated/risk'
 import { Route as AuthenticatedReportsRouteImport } from './routes/_authenticated/reports'
 import { Route as AuthenticatedPositionsRouteImport } from './routes/_authenticated/positions'
 import { Route as AuthenticatedParametersRouteImport } from './routes/_authenticated/parameters'
+import { Route as AuthenticatedOverviewRouteImport } from './routes/_authenticated/overview'
 import { Route as AuthenticatedOpportunitiesRouteImport } from './routes/_authenticated/opportunities'
 import { Route as AuthenticatedLogsRouteImport } from './routes/_authenticated/logs'
 import { Route as AuthenticatedLearningRouteImport } from './routes/_authenticated/learning'
@@ -36,6 +38,11 @@ const AuthenticatedRouteRoute = AuthenticatedRouteRouteImport.update({
 const AuthenticatedIndexRoute = AuthenticatedIndexRouteImport.update({
   id: '/',
   path: '/',
+  getParentRoute: () => AuthenticatedRouteRoute,
+} as any)
+const AuthenticatedThesisRoute = AuthenticatedThesisRouteImport.update({
+  id: '/thesis',
+  path: '/thesis',
   getParentRoute: () => AuthenticatedRouteRoute,
 } as any)
 const AuthenticatedSimulationRoute = AuthenticatedSimulationRouteImport.update({
@@ -61,6 +68,11 @@ const AuthenticatedPositionsRoute = AuthenticatedPositionsRouteImport.update({
 const AuthenticatedParametersRoute = AuthenticatedParametersRouteImport.update({
   id: '/parameters',
   path: '/parameters',
+  getParentRoute: () => AuthenticatedRouteRoute,
+} as any)
+const AuthenticatedOverviewRoute = AuthenticatedOverviewRouteImport.update({
+  id: '/overview',
+  path: '/overview',
   getParentRoute: () => AuthenticatedRouteRoute,
 } as any)
 const AuthenticatedOpportunitiesRoute =
@@ -139,11 +151,13 @@ export interface FileRoutesByFullPath {
   '/learning': typeof AuthenticatedLearningRoute
   '/logs': typeof AuthenticatedLogsRoute
   '/opportunities': typeof AuthenticatedOpportunitiesRoute
+  '/overview': typeof AuthenticatedOverviewRoute
   '/parameters': typeof AuthenticatedParametersRoute
   '/positions': typeof AuthenticatedPositionsRoute
   '/reports': typeof AuthenticatedReportsRoute
   '/risk': typeof AuthenticatedRiskRoute
   '/simulation': typeof AuthenticatedSimulationRoute
+  '/thesis': typeof AuthenticatedThesisRoute
   '/errors/$error': typeof AuthenticatedErrorsErrorRoute
   '/settings/': typeof AuthenticatedSettingsIndexRoute
 }
@@ -158,11 +172,13 @@ export interface FileRoutesByTo {
   '/learning': typeof AuthenticatedLearningRoute
   '/logs': typeof AuthenticatedLogsRoute
   '/opportunities': typeof AuthenticatedOpportunitiesRoute
+  '/overview': typeof AuthenticatedOverviewRoute
   '/parameters': typeof AuthenticatedParametersRoute
   '/positions': typeof AuthenticatedPositionsRoute
   '/reports': typeof AuthenticatedReportsRoute
   '/risk': typeof AuthenticatedRiskRoute
   '/simulation': typeof AuthenticatedSimulationRoute
+  '/thesis': typeof AuthenticatedThesisRoute
   '/': typeof AuthenticatedIndexRoute
   '/errors/$error': typeof AuthenticatedErrorsErrorRoute
   '/settings': typeof AuthenticatedSettingsIndexRoute
@@ -180,11 +196,13 @@ export interface FileRoutesById {
   '/_authenticated/learning': typeof AuthenticatedLearningRoute
   '/_authenticated/logs': typeof AuthenticatedLogsRoute
   '/_authenticated/opportunities': typeof AuthenticatedOpportunitiesRoute
+  '/_authenticated/overview': typeof AuthenticatedOverviewRoute
   '/_authenticated/parameters': typeof AuthenticatedParametersRoute
   '/_authenticated/positions': typeof AuthenticatedPositionsRoute
   '/_authenticated/reports': typeof AuthenticatedReportsRoute
   '/_authenticated/risk': typeof AuthenticatedRiskRoute
   '/_authenticated/simulation': typeof AuthenticatedSimulationRoute
+  '/_authenticated/thesis': typeof AuthenticatedThesisRoute
   '/_authenticated/': typeof AuthenticatedIndexRoute
   '/_authenticated/errors/$error': typeof AuthenticatedErrorsErrorRoute
   '/_authenticated/settings/': typeof AuthenticatedSettingsIndexRoute
@@ -203,11 +221,13 @@ export interface FileRouteTypes {
     | '/learning'
     | '/logs'
     | '/opportunities'
+    | '/overview'
     | '/parameters'
     | '/positions'
     | '/reports'
     | '/risk'
     | '/simulation'
+    | '/thesis'
     | '/errors/$error'
     | '/settings/'
   fileRoutesByTo: FileRoutesByTo
@@ -222,11 +242,13 @@ export interface FileRouteTypes {
     | '/learning'
     | '/logs'
     | '/opportunities'
+    | '/overview'
     | '/parameters'
     | '/positions'
     | '/reports'
     | '/risk'
     | '/simulation'
+    | '/thesis'
     | '/'
     | '/errors/$error'
     | '/settings'
@@ -243,11 +265,13 @@ export interface FileRouteTypes {
     | '/_authenticated/learning'
     | '/_authenticated/logs'
     | '/_authenticated/opportunities'
+    | '/_authenticated/overview'
     | '/_authenticated/parameters'
     | '/_authenticated/positions'
     | '/_authenticated/reports'
     | '/_authenticated/risk'
     | '/_authenticated/simulation'
+    | '/_authenticated/thesis'
     | '/_authenticated/'
     | '/_authenticated/errors/$error'
     | '/_authenticated/settings/'
@@ -276,6 +300,13 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof AuthenticatedIndexRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
+    '/_authenticated/thesis': {
+      id: '/_authenticated/thesis'
+      path: '/thesis'
+      fullPath: '/thesis'
+      preLoaderRoute: typeof AuthenticatedThesisRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
     '/_authenticated/simulation': {
@@ -311,6 +342,13 @@ declare module '@tanstack/react-router' {
       path: '/parameters'
       fullPath: '/parameters'
       preLoaderRoute: typeof AuthenticatedParametersRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
+    '/_authenticated/overview': {
+      id: '/_authenticated/overview'
+      path: '/overview'
+      fullPath: '/overview'
+      preLoaderRoute: typeof AuthenticatedOverviewRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
     '/_authenticated/opportunities': {
@@ -406,11 +444,13 @@ interface AuthenticatedRouteRouteChildren {
   AuthenticatedLearningRoute: typeof AuthenticatedLearningRoute
   AuthenticatedLogsRoute: typeof AuthenticatedLogsRoute
   AuthenticatedOpportunitiesRoute: typeof AuthenticatedOpportunitiesRoute
+  AuthenticatedOverviewRoute: typeof AuthenticatedOverviewRoute
   AuthenticatedParametersRoute: typeof AuthenticatedParametersRoute
   AuthenticatedPositionsRoute: typeof AuthenticatedPositionsRoute
   AuthenticatedReportsRoute: typeof AuthenticatedReportsRoute
   AuthenticatedRiskRoute: typeof AuthenticatedRiskRoute
   AuthenticatedSimulationRoute: typeof AuthenticatedSimulationRoute
+  AuthenticatedThesisRoute: typeof AuthenticatedThesisRoute
   AuthenticatedIndexRoute: typeof AuthenticatedIndexRoute
   AuthenticatedErrorsErrorRoute: typeof AuthenticatedErrorsErrorRoute
   AuthenticatedSettingsIndexRoute: typeof AuthenticatedSettingsIndexRoute
@@ -422,11 +462,13 @@ const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
   AuthenticatedLearningRoute: AuthenticatedLearningRoute,
   AuthenticatedLogsRoute: AuthenticatedLogsRoute,
   AuthenticatedOpportunitiesRoute: AuthenticatedOpportunitiesRoute,
+  AuthenticatedOverviewRoute: AuthenticatedOverviewRoute,
   AuthenticatedParametersRoute: AuthenticatedParametersRoute,
   AuthenticatedPositionsRoute: AuthenticatedPositionsRoute,
   AuthenticatedReportsRoute: AuthenticatedReportsRoute,
   AuthenticatedRiskRoute: AuthenticatedRiskRoute,
   AuthenticatedSimulationRoute: AuthenticatedSimulationRoute,
+  AuthenticatedThesisRoute: AuthenticatedThesisRoute,
   AuthenticatedIndexRoute: AuthenticatedIndexRoute,
   AuthenticatedErrorsErrorRoute: AuthenticatedErrorsErrorRoute,
   AuthenticatedSettingsIndexRoute: AuthenticatedSettingsIndexRoute,

@@ -14,7 +14,7 @@ from bot.phase_c43_autonomous_entry_live import (
     _lifecycle_mutation_lock_path,
     reconcile_phase_c43_fills_to_positions,
 )
-from bot.phase_d2_position_executor import D2_PLAN_STATUS_READY, build_phase_d2_position_executor_report
+from bot.phase_d2_position_executor import D2_PLAN_STATUS_READY, build_d2_exit_market_context, build_phase_d2_position_executor_report
 from bot.phase_d3_controlled_live_exits import build_phase_d3_controlled_live_exit_report
 from bot.state_store import StateStore
 
@@ -304,6 +304,7 @@ def _build_d2_and_d3(
     build_d2_plan: bool,
     build_d3_preview: bool,
     persist_d2_plan: bool,
+    coinbase_client: Any = None,
 ) -> Dict[str, Any]:
     d2_report = None
     d3_report = None
@@ -313,6 +314,7 @@ def _build_d2_and_d3(
             ticker=ticker,
             state_store=state_store,
             persist_plan=persist_d2_plan,
+            market_context=build_d2_exit_market_context(ticker, coinbase_client=coinbase_client),
         )
     if build_d3_preview:
         d3_report = build_phase_d3_controlled_live_exit_report(
@@ -420,6 +422,7 @@ def _build_phase_c43_lifecycle_orchestrator_report_unlocked(
                 build_d2_plan=build_d2_plan,
                 build_d3_preview=build_d3_preview,
                 persist_d2_plan=persist_d2_plan,
+                coinbase_client=coinbase_client,
             )
             if isinstance(follow.get("d2_report"), dict):
                 d2_reports.append(follow["d2_report"])

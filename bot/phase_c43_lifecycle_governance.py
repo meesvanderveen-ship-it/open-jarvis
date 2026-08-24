@@ -91,6 +91,7 @@ def build_phase_c43_lifecycle_governance_report(
     ticker: str = "",
     cycle_type: str = "manual",
     source: str = "service_hook",
+    retry_position_count: int = 0,
 ) -> Dict[str, Any]:
     """Decide effective lifecycle hook behavior for C.4.4.2.
 
@@ -100,9 +101,19 @@ def build_phase_c43_lifecycle_governance_report(
     effective flags instead of raw .env flags so that unsafe flag combinations
     degrade to preview/no-op rather than activating multiple lifecycle steps at
     once.
+
+    `retry_position_count` is the number of already-open positions whose D.2
+    plan is not yet ready/persisted (e.g. blocked by the fee-edge gate) and
+    that therefore need a D.2 rebuild attempt even though there is no new
+    local C.4.3/D.3 order justifying it. It only ever widens `can_apply`
+    alongside the existing safety blockers (live-exit flags, D3 actual-submit,
+    poll requirement) -- it does not bypass any of them, and it never affects
+    `can_poll` (there is no Coinbase order to poll for a pure D.2 retry).
     """
     orders = [dict(o) for o in (local_open_c43_orders or [])]
     open_count = len(orders)
+    retry_count = max(0, int(retry_position_count or 0))
+    apply_justification_count = open_count + retry_count
 
     raw = {
         "enable_phase_c43_lifecycle_orchestrator": _cfg_bool(cfg, "enable_phase_c43_lifecycle_orchestrator", True),
@@ -134,16 +145,18 @@ def build_phase_c43_lifecycle_governance_report(
     if not raw["enable_phase_c43_lifecycle_orchestrator"]:
         decisions.append("orchestrator_disabled")
 
-    if open_count == 0:
+    if apply_justification_count == 0:
         decisions.append("no_open_c43_orders_preview_noop")
         if raw["allow_coinbase_poll"]:
             warnings.append("allow_coinbase_poll_requested_but_no_open_orders")
         if raw["apply_local"]:
             warnings.append("apply_local_requested_but_no_open_orders")
+    elif open_count == 0 and retry_count > 0:
+        decisions.append("d2_retry_only_no_open_c43_orders")
 
     if raw["allow_coinbase_poll"] and open_count > limits["max_poll_orders_per_cycle"]:
         blockers.append("open_c43_orders_exceed_poll_limit")
-    if raw["apply_local"] and open_count > limits["max_apply_actions_per_cycle"]:
+    if raw["apply_local"] and apply_justification_count > limits["max_apply_actions_per_cycle"]:
         blockers.append("open_c43_orders_exceed_apply_limit")
 
     max_quote = _to_decimal(limits["max_entry_quote"], "25.00")
@@ -179,8 +192,8 @@ def build_phase_c43_lifecycle_governance_report(
     can_apply = bool(
         raw["enable_phase_c43_lifecycle_orchestrator"]
         and raw["apply_local"]
-        and open_count > 0
-        and open_count <= limits["max_apply_actions_per_cycle"]
+        and apply_justification_count > 0
+        and apply_justification_count <= limits["max_apply_actions_per_cycle"]
         and not blockers
     )
     build_d2 = bool(can_apply and raw["build_d2_plan"])
@@ -208,7 +221,7 @@ def build_phase_c43_lifecycle_governance_report(
         status = "apply_local_governed"
     elif can_poll:
         status = "poll_only_governed"
-    elif open_count == 0:
+    elif apply_justification_count == 0:
         status = "no_open_orders_noop"
 
     return _json_safe({
@@ -233,6 +246,10 @@ def build_phase_c43_lifecycle_governance_report(
             "by_ticker": _count_orders_by_ticker(orders),
             "orders": [_order_identity(o) for o in orders[:20]],
             "truncated": max(0, open_count - 20),
+        },
+        "d2_retry_positions": {
+            "count": retry_count,
+            "apply_justification_count": apply_justification_count,
         },
         "blockers": blockers,
         "warnings": warnings,

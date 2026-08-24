@@ -306,3 +306,123 @@ def test_service_filled_d3_exit_proposes_apply_without_local_apply(tmp_path: Pat
     assert d3_report["state_write_performed"] is False
     assert report["summary"]["d3_applied_actions"] == 0
     assert store.get_order("phased3-BTCUSDC-TP1-bc3330fe-0T2153114172190000")["status"] == "submitted"
+
+
+class FakeStateStore:
+    """Minimal read-only stand-in: build_phase_c43_lifecycle_service_report's
+    new D.2-retry path only ever reads positions, never writes through this."""
+
+    def __init__(self, positions):
+        self._positions = {str(k).upper(): v for k, v in positions.items()}
+
+    def get_positions(self):
+        return dict(self._positions)
+
+    def get_position(self, ticker):
+        return self._positions.get(str(ticker).upper())
+
+
+def _open_position(ticker="BTC-USDC", entry_price="80.42"):
+    return {
+        "ticker": ticker,
+        "status": "open",
+        "entry_price": entry_price,
+        "position_size_base": "1.0",
+        "stop_price": str(float(entry_price) * 0.98),
+        "take_profit_price": str(float(entry_price) * 1.02),
+    }
+
+
+def _retry_cfg(tmp_path: Path, **overrides):
+    return _cfg(
+        tmp_path,
+        phase_c43_lifecycle_allow_coinbase_poll=True,
+        phase_c43_lifecycle_apply_local=True,
+        phase_c43_lifecycle_build_d2_plan=True,
+        phase_c43_lifecycle_persist_d2_plan=False,
+        **overrides,
+    )
+
+
+def test_service_retries_d2_for_open_position_without_ready_plan_and_no_open_order(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    store = _store(tmp_path)
+    state = FakeStateStore({"BTC-USDC": _open_position()})
+
+    report = build_phase_c43_lifecycle_service_report(
+        cfg=_retry_cfg(tmp_path),
+        order_store=store,
+        state_store=state,
+        coinbase_client=FakeCoinbaseClient(),
+        cycle_type="full",
+        source="unit_test",
+    )
+
+    assert report["positions_needing_d2_retry"] == ["BTC-USDC"]
+    assert len(report["d2_retry_orchestrator_reports"]) == 1
+    assert report["governance_report"]["d2_retry_positions"]["count"] == 1
+    assert report["governance_report"]["status"] == "apply_local_governed"
+    retry_report = report["d2_retry_orchestrator_reports"][0]
+    assert retry_report["ticker"] == "BTC-USDC"
+    assert len(retry_report["d2_reports"]) == 1
+    assert retry_report["d2_reports"][0]["ticker"] == "BTC-USDC"
+
+
+def test_service_skips_retry_when_persisted_plan_already_ready(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "state").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "state/phase_d2_position_executor_plans.json").write_text(
+        '{"plans": {"BTC-USDC": {"ticker": "BTC-USDC", "status": "position_executor_plan_ready_no_live_exit_submit"}}}',
+        encoding="utf-8",
+    )
+    store = _store(tmp_path)
+    state = FakeStateStore({"BTC-USDC": _open_position()})
+
+    report = build_phase_c43_lifecycle_service_report(
+        cfg=_retry_cfg(tmp_path),
+        order_store=store,
+        state_store=state,
+        cycle_type="full",
+        source="unit_test",
+    )
+
+    assert report["positions_needing_d2_retry"] == []
+    assert report["d2_retry_orchestrator_reports"] == []
+
+
+def test_service_skips_retry_when_ticker_already_covered_by_open_c43_order(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    store = _store(tmp_path)
+    _add_open_c43_order(store, ticker="BTC-USDC")
+    state = FakeStateStore({"BTC-USDC": _open_position()})
+
+    report = build_phase_c43_lifecycle_service_report(
+        cfg=_retry_cfg(tmp_path),
+        order_store=store,
+        state_store=state,
+        coinbase_client=FakeCoinbaseClient(),
+        cycle_type="full",
+        source="unit_test",
+    )
+
+    assert report["positions_needing_d2_retry"] == []
+    assert report["d2_retry_orchestrator_reports"] == []
+    # the ticker is still handled through the normal open_c43_orders path
+    assert report["local_open_c43_orders_precheck"] == 1
+
+
+def test_service_retry_without_build_d2_flag_does_nothing(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    store = _store(tmp_path)
+    state = FakeStateStore({"BTC-USDC": _open_position()})
+
+    report = build_phase_c43_lifecycle_service_report(
+        cfg=_cfg(tmp_path),  # apply_local/build_d2 both default False
+        order_store=store,
+        state_store=state,
+        cycle_type="full",
+        source="unit_test",
+    )
+
+    assert report["positions_needing_d2_retry"] == ["BTC-USDC"]
+    assert report["d2_retry_orchestrator_reports"] == []

@@ -205,6 +205,7 @@ def record_llm_call(
     agent: Optional[str] = None,
     input_tokens: Optional[int] = None,
     output_tokens: Optional[int] = None,
+    cached_tokens: Optional[int] = None,
     latency_ms: Optional[float] = None,
     call_outcome: str = "success",
     error_type: Optional[str] = None,
@@ -239,13 +240,14 @@ def record_llm_call(
             "input_tokens": int(input_tokens) if input_tokens is not None else None,
             "output_tokens": int(output_tokens) if output_tokens is not None else None,
             "total_tokens": total_tokens,
+            "cached_tokens": int(cached_tokens) if cached_tokens is not None else None,
             "estimated_cost_usd": estimate_cost_usd(model, input_tokens, output_tokens),
             "latency_ms": round(latency_ms, 1) if latency_ms is not None else None,
             "call_outcome": _redact_scalar(call_outcome, max_len=32),
             "error_type": _redact_scalar(error_type, max_len=64) if error_type else None,
             "decision_result": decision_label,
             "was_call_necessary": _necessity_label(decision_label, call_outcome),
-            "cache_hit": bool(cache_hit),
+            "cache_hit": bool(cached_tokens) if cached_tokens is not None else bool(cache_hit),
             "skipped_due_budget": bool(skipped_due_budget),
         }
         _append(entry)

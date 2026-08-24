@@ -180,6 +180,66 @@ def test_duplicate_open_exit_blocks_before_cancel(tmp_path):
     assert report["cancel_attempted"] is False
 
 
+class TransientThenCancelledCoinbaseClient(FakeCoinbaseClient):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.get_order_call_count = 0
+
+    def get_order(self, order_id):
+        self.get_order_call_count += 1
+        if self.get_order_call_count < 3:
+            return {
+                "order": {
+                    "order_id": order_id,
+                    "status": "OPEN",
+                    "filled_size": "0",
+                    "filled_value": "0",
+                    "average_filled_price": "0",
+                    "number_of_fills": "0",
+                    "product_id": TICKER,
+                    "side": "SELL",
+                }
+            }
+        return {
+            "order": {
+                "order_id": order_id,
+                "status": "CANCELLED",
+                "filled_size": "0",
+                "filled_value": "0",
+                "average_filled_price": "0",
+                "number_of_fills": "0",
+                "product_id": TICKER,
+                "side": "SELL",
+            }
+        }
+
+    def get_recent_fills_for_order(self, order_id, limit=100):
+        return []
+
+
+def test_retries_post_cancel_confirmation_past_transient_open_status(tmp_path):
+    # Regression test for the same race-condition class fixed live 2026-07-08 in
+    # the sibling controlled stop-exit path: a post-cancel confirmation lookup
+    # taken immediately after cancel_order can read back a transient
+    # non-terminal status before Coinbase's backend settles. A brief retry must
+    # pick up the real terminal status instead of blocking a valid replacement.
+    # No post_cancel_snapshot is passed here (unlike every other live-route
+    # test in this file) specifically so _resolve_lifecycle_snapshot actually
+    # calls get_order instead of bypassing it.
+    client = TransientThenCancelledCoinbaseClient()
+    report, _, _ = _run(
+        tmp_path,
+        client=client,
+        allow_live_cancel=True,
+        allow_live_replace=True,
+        post_cancel_confirmation_retry_seconds=0,
+    )
+
+    assert client.get_order_call_count == 3
+    assert report["status"] == "d4_controlled_cancel_replace_applied"
+    assert report["cancel_confirmed"] is True
+
+
 def test_happy_live_route_cancel_first_then_submit_and_updates_state(tmp_path):
     client = FakeCoinbaseClient()
     report, orders_file, positions_file = _run(

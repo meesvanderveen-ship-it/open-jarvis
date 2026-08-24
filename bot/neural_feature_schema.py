@@ -101,6 +101,21 @@ def _alignment(value: Any) -> Optional[int]:
     return 1 if number > 0 else (-1 if number < 0 else 0)
 
 
+def _ema_alignment_from(fp: Dict[str, Any], timeframe: str) -> Optional[int]:
+    """Classic 50/200 EMA alignment (+1 bull, -1 bear, 0 flat).
+
+    The feature pack does not expose a precomputed ``ema_alignment`` key — only the
+    raw ``ema_50``/``ema_200`` per timeframe (bot/market_data.py). The old schema read
+    a non-existent ``indicators.<tf>.ema_alignment`` path and always got None, so this
+    derives it from the values that actually exist.
+    """
+    e50 = as_float(deep_get(fp, [("indicators", timeframe, "ema_50"), ("raw_context", timeframe, "ema_50")], None))
+    e200 = as_float(deep_get(fp, [("indicators", timeframe, "ema_200"), ("raw_context", timeframe, "ema_200")], None))
+    if e50 is None or e200 is None:
+        return None
+    return 1 if e50 > e200 else (-1 if e50 < e200 else 0)
+
+
 def canonical_features(source: Dict[str, Any]) -> Dict[str, Any]:
     if isinstance(source.get("features"), dict):
         return {name: source["features"].get(name) for name in [*CATEGORICAL_FEATURES, *BOOLEAN_FEATURES, *NUMERIC_FEATURES]}
@@ -123,11 +138,11 @@ def canonical_features(source: Dict[str, Any]) -> Dict[str, Any]:
         "pending_trigger_ready": as_bool(pending.get("trigger_ready") or pending.get("should_force_full_analysis")),
         "spread_pct": as_float(deep_get(fp, [("spread_pct",), ("market", "spread_pct"), ("orderbook_context", "spread_pct")], market.get("spread_pct"))),
         "orderbook_imbalance": as_float(deep_get(fp, [("orderbook_context", "imbalance"), ("orderbook_context", "orderbook_imbalance"), ("market", "orderbook_imbalance")], orderbook.get("imbalance"))),
-        "rsi_15m": as_float(deep_get(fp, [("indicators", "15m", "rsi"), ("raw_context", "15m", "rsi")], None)),
-        "rsi_1h": as_float(deep_get(fp, [("indicators", "1h", "rsi"), ("raw_context", "1h", "rsi")], None)),
-        "adx_1h": as_float(deep_get(fp, [("indicators", "1h", "adx"), ("raw_context", "1h", "adx")], None)),
-        "ema_4h_alignment": _alignment(deep_get(fp, [("indicators", "4h", "ema_alignment"), ("raw_context", "4h", "ema_alignment"), ("indicators", "4h", "trend")], None)),
-        "ema_1d_alignment": _alignment(deep_get(fp, [("indicators", "1d", "ema_alignment"), ("raw_context", "1d", "ema_alignment"), ("indicators", "1d", "trend")], None)),
+        "rsi_15m": as_float(deep_get(fp, [("indicators", "15m", "rsi_14"), ("raw_context", "15m", "rsi_14"), ("indicators", "15m", "rsi")], None)),
+        "rsi_1h": as_float(deep_get(fp, [("indicators", "1h", "rsi_14"), ("raw_context", "1h", "rsi_14"), ("indicators", "1h", "rsi")], None)),
+        "adx_1h": as_float(deep_get(fp, [("indicators", "1h", "adx_14"), ("raw_context", "1h", "adx_14"), ("indicators", "1h", "adx")], None)),
+        "ema_4h_alignment": _ema_alignment_from(fp, "4h"),
+        "ema_1d_alignment": _ema_alignment_from(fp, "1d"),
         "price_to_support_pct": as_float(deep_get(fp, [("structure", "price_to_support_pct"), ("market_structure", "price_to_support_pct")], None)),
         "price_to_resistance_pct": as_float(deep_get(fp, [("structure", "price_to_resistance_pct"), ("market_structure", "price_to_resistance_pct")], None)),
         "volume_vs_avg": as_float(deep_get(fp, [("indicators", "1h", "volume_vs_avg"), ("raw_context", "1h", "volume_vs_avg")], None)),

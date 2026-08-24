@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -291,21 +292,44 @@ def _resume_after_local_cancel_invariants(
     return blockers
 
 
+_LIFECYCLE_TERMINAL_STATUSES = {"cancelled", "canceled", "filled", "expired", "rejected"}
+
+
 def _resolve_lifecycle_snapshot(
     *,
     coinbase_client: Any,
     order: Dict[str, Any],
     exchange_order_id: str,
     snapshot: Optional[Dict[str, Any]],
+    retry_past_non_terminal: bool = False,
+    max_attempts: int = 4,
+    retry_seconds: float = 0.75,
 ) -> Dict[str, Any]:
     if snapshot is not None:
         return _json_safe({"coinbase_call_attempted": False, "coinbase_call_succeeded": True, **dict(snapshot)})
-    fetched = fetch_coinbase_order_snapshot(
-        coinbase_client=coinbase_client,
-        order_id=exchange_order_id,
-        local_order=order,
-        include_fills=True,
-    )
+    # A cancel resolves near-instantly on Coinbase's matching engine, but a
+    # snapshot lookup taken immediately after can still race ahead of
+    # settlement (confirmed live 2026-07-08 in the sibling controlled
+    # stop-exit path: an order that had actually filled completely was read
+    # back as "OPEN" moments after submit). retry_past_non_terminal is only
+    # set by the post-cancel confirmation call site below -- the preflight
+    # call site has no just-submitted action to race against, so it keeps its
+    # original single-lookup behavior.
+    fetched: Dict[str, Any] = {}
+    attempts = max(1, int(max_attempts)) if retry_past_non_terminal else 1
+    for attempt in range(attempts):
+        fetched = fetch_coinbase_order_snapshot(
+            coinbase_client=coinbase_client,
+            order_id=exchange_order_id,
+            local_order=order,
+            include_fills=True,
+        )
+        status = str(fetched.get("normalized_status") or "").strip().lower()
+        filled = _to_decimal(fetched.get("filled_base"))
+        if not retry_past_non_terminal or status in _LIFECYCLE_TERMINAL_STATUSES or filled > ZERO:
+            break
+        if attempt < attempts - 1:
+            time.sleep(max(0.0, float(retry_seconds)))
     fills_summary = fetched.get("fills_summary") if isinstance(fetched.get("fills_summary"), dict) else {}
     return _json_safe({
         "coinbase_call_attempted": True,
@@ -388,6 +412,8 @@ def run_phase_d4_controlled_cancel_replace(
     post_cancel_snapshot: Optional[Dict[str, Any]] = None,
     resume_after_confirmed_cancel: bool = False,
     cancel_only_after_confirmed_cancel: bool = False,
+    post_cancel_confirmation_max_attempts: int = 4,
+    post_cancel_confirmation_retry_seconds: float = 0.75,
 ) -> Dict[str, Any]:
     selected_ticker = _normalize_ticker(ticker)
     replacement_price_dec = _to_decimal(replacement_price)
@@ -677,6 +703,9 @@ def run_phase_d4_controlled_cancel_replace(
                 order=order,
                 exchange_order_id=exchange_order_id,
                 snapshot=post_cancel_snapshot,
+                retry_past_non_terminal=True,
+                max_attempts=post_cancel_confirmation_max_attempts,
+                retry_seconds=post_cancel_confirmation_retry_seconds,
             )
         except Exception as exc:
             report.update({

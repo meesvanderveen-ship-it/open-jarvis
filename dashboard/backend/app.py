@@ -34,6 +34,7 @@ from dashboard.backend.routers import (
     run_summary,
     shadow_outcomes,
     status,
+    thesis,
     trace,
 )
 from dashboard.backend.security.redact_middleware import RedactJSONMiddleware
@@ -60,6 +61,7 @@ app.include_router(run_summary.router)
 app.include_router(llm_cost.router)
 app.include_router(shadow_outcomes.router)
 app.include_router(full_proposals.router)
+app.include_router(thesis.router)
 
 
 class SPAStaticFiles(StaticFiles):

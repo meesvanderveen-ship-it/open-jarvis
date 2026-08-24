@@ -12,7 +12,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from bot.adaptive_policy_lab import CANDIDATE_JSON_PATH, canonical_regime_key, regime_diversity_diagnostics, stable_payload_hash
 from bot.approved_parameter_profile import APPROVED_PARAMETER_PROFILE_WHITELIST, sha256_file
-from bot.atomic_io import atomic_write_json
+from bot.atomic_io import atomic_write_json, atomic_write_text
 from bot.parameter_candidate_analysis import ANALYSIS_JSON_PATH
 
 try:
@@ -47,6 +47,9 @@ ALLOWED_PARAMETERS = {
     "PHASE_D2_MIN_REWARD_TO_RISK_RATIO",
     "MAX_SPREAD_PCT",
     "EXIT_TARGET_MAX_DISTANCE_FROM_MID_PCT",
+    "STOP_DISTANCE_PCT",
+    "PHASE_D2_DEFAULT_TRAILING_ACTIVATION_PCT",
+    "PHASE_D2_DEFAULT_TRAILING_DISTANCE_PCT",
     "setup_type_specific_trigger_strictness",
     "starter_probe_eligibility_thresholds",
 }
@@ -266,6 +269,26 @@ def governor_settings(env: Optional[Mapping[str, str]] = None) -> Dict[str, Any]
             _int(env_map.get("ADAPTIVE_PARAMETER_CHANGE_COOLDOWN_DAYS"), 0) * 24,
         ),
         "cooldown_days": _int(env_map.get("ADAPTIVE_PARAMETER_CHANGE_COOLDOWN_DAYS"), 0),
+        # Separate from `cooldown_hours` (which gates *new* activations and is
+        # deliberately 0 in this deployment because max_changes_per_24h already
+        # rate-limits). This gates how long a *just-applied* change must age,
+        # with no observed error/rollback, before evaluate_pending_activation()
+        # will auto-clear "previous_activation_not_evaluated" -- nothing else in
+        # the codebase ever sets `evaluated: true`, so without this the governor
+        # can apply at most one change, ever.
+        "evaluation_cooldown_hours": _int(env_map.get("AUTONOMOUS_PARAMETER_EVALUATION_COOLDOWN_HOURS"), 24),
+        # Outcome-based feedback (not just "no errors"): compares decision-quality
+        # label rates in state/decision_outcomes.json before vs after an
+        # activation. Deliberately separate from require_new_evidence_since_last_apply
+        # etc: this measures the *effect* of a change, not the evidence that
+        # justified proposing it.
+        "outcome_min_sample_size": _int(env_map.get("AUTONOMOUS_PARAMETER_MIN_OUTCOME_SAMPLE"), 100),
+        "outcome_regression_threshold_pct": _float(env_map.get("AUTONOMOUS_PARAMETER_REGRESSION_THRESHOLD_PCT")) or 5.0,
+        # Off by default on purpose: a detected regression is always reported
+        # (evaluation_outcome = "regressed_recommend_manual_review"), but only
+        # auto-rolled back when this is explicitly, separately turned on --
+        # never by silently reusing the manual rollback ACK.
+        "auto_rollback_on_regression": _bool(env_map.get("AUTONOMOUS_PARAMETER_AUTO_ROLLBACK_ON_REGRESSION"), False),
         "apply_only_when_no_open_orders": _bool(
             env_map.get("AUTONOMOUS_PARAMETER_APPLY_ONLY_WHEN_NO_OPEN_ORDERS"),
             _bool(env_map.get("ADAPTIVE_BLOCK_APPLY_WITH_OPEN_ORDERS"), True),
@@ -804,6 +827,247 @@ def _load_activations(root: Path) -> List[Dict[str, Any]]:
     return rows
 
 
+AUTO_EVALUATION_METHOD = "time_and_health_check_auto"
+
+
+def _errors_since(root: Path, since: datetime, *, tail_lines: int = 500) -> bool:
+    """True if logs/errors.jsonl has any record timestamped after `since`.
+
+    Used only as an evaluation-time health signal (not a live trading gate),
+    so a bounded tail read is sufficient and keeps this cheap on a large log.
+    """
+    path = root / "logs/errors.jsonl"
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return False
+    for line in lines[-tail_lines:]:
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(row, dict):
+            continue
+        ts = parse_time(row.get("generated_at") or row.get("timestamp") or row.get("created_at"))
+        if ts and ts > since:
+            return True
+    return False
+
+
+def _load_decision_outcomes_records(root: Path) -> List[Dict[str, Any]]:
+    payload = _load_json(root / "state/decision_outcomes.json")
+    records = payload.get("records") if isinstance(payload, dict) else None
+    return [row for row in records if isinstance(row, dict)] if isinstance(records, list) else []
+
+
+def _outcome_label_rate(
+    metrics: Mapping[str, Any],
+    *,
+    decision_categories: Sequence[str],
+    target_labels: Sequence[str],
+    baseline_labels: Sequence[str],
+) -> Optional[float]:
+    """Share of `target_labels` among (`target_labels` + `baseline_labels`)
+    within the given decision categories -- e.g. missed_opportunity's share of
+    all resolved wait/watch decisions. Returns None when the denominator is
+    zero (nothing to compare, not "zero regression")."""
+    by_category = metrics.get("by_decision_category") if isinstance(metrics.get("by_decision_category"), Mapping) else {}
+    target = 0
+    baseline = 0
+    for category in decision_categories:
+        counts = by_category.get(category) if isinstance(by_category.get(category), Mapping) else {}
+        target += sum(int(counts.get(label) or 0) for label in target_labels)
+        baseline += sum(int(counts.get(label) or 0) for label in baseline_labels)
+    denominator = target + baseline
+    if denominator <= 0:
+        return None
+    return target / denominator
+
+
+def assess_activation_outcome(
+    *,
+    root: Path,
+    generated_at: str,
+    evaluated_at: str,
+    min_sample_size: int,
+    regression_threshold_pct: float,
+) -> Dict[str, Any]:
+    """Compare decision-quality label rates before vs after an applied change.
+
+    Deliberately does not use realized PnL: this system has essentially no
+    realized-trade history (one closed trade total as of this writing), so a
+    PnL comparison would be a near-zero-sample illusion. decision_outcomes.json
+    already resolves hundreds of wait/prepared-plan/approved-entry decisions
+    per window, which is a real, honest signal for "did entries/waits get
+    measurably better or worse after this change."
+    """
+    before_ts = parse_time(generated_at)
+    after_ts = parse_time(evaluated_at)
+    if before_ts is None or after_ts is None:
+        return {"available": False, "reason": "missing_before_after_timestamps"}
+
+    from bot.decision_outcome_tracker import _performance_metrics  # deferred: avoids a governor<->tracker import cycle
+
+    records = _load_decision_outcomes_records(root)
+    before_records = [
+        row for row in records
+        if str(row.get("status")) == "resolved" and (parse_time(row.get("created_at")) or after_ts) < before_ts
+    ]
+    after_records = [
+        row for row in records
+        if str(row.get("status")) == "resolved" and (parse_time(row.get("created_at")) or before_ts) >= after_ts
+    ]
+    before_metrics = _performance_metrics(before_records)
+    after_metrics = _performance_metrics(after_records)
+
+    result: Dict[str, Any] = {
+        "before_sample_size": before_metrics["sample_size"],
+        "after_sample_size": after_metrics["sample_size"],
+        "min_sample_size": min_sample_size,
+    }
+    if before_metrics["sample_size"] < min_sample_size or after_metrics["sample_size"] < min_sample_size:
+        result.update({"available": False, "reason": "insufficient_sample", "regressed": False})
+        return result
+
+    missed_before = _outcome_label_rate(
+        before_metrics, decision_categories=("wait", "watch"),
+        target_labels=("missed_opportunity",), baseline_labels=("correct_avoid", "correct_wait_or_neutral"),
+    )
+    missed_after = _outcome_label_rate(
+        after_metrics, decision_categories=("wait", "watch"),
+        target_labels=("missed_opportunity",), baseline_labels=("correct_avoid", "correct_wait_or_neutral"),
+    )
+    false_positive_before = _outcome_label_rate(
+        before_metrics, decision_categories=("prepared_plan", "approved_entry"),
+        target_labels=("false_positive_plan",), baseline_labels=("plan_follow_through", "plan_inconclusive"),
+    )
+    false_positive_after = _outcome_label_rate(
+        after_metrics, decision_categories=("prepared_plan", "approved_entry"),
+        target_labels=("false_positive_plan",), baseline_labels=("plan_follow_through", "plan_inconclusive"),
+    )
+
+    deltas_pct: Dict[str, float] = {}
+    if missed_before is not None and missed_after is not None:
+        deltas_pct["missed_opportunity_rate_delta_pct"] = round((missed_after - missed_before) * 100.0, 4)
+    if false_positive_before is not None and false_positive_after is not None:
+        deltas_pct["false_positive_plan_rate_delta_pct"] = round((false_positive_after - false_positive_before) * 100.0, 4)
+
+    regressed = any(value > regression_threshold_pct for value in deltas_pct.values())
+    result.update({
+        "available": True,
+        "missed_opportunity_rate_before": missed_before,
+        "missed_opportunity_rate_after": missed_after,
+        "false_positive_plan_rate_before": false_positive_before,
+        "false_positive_plan_rate_after": false_positive_after,
+        "deltas_pct": deltas_pct,
+        "regression_threshold_pct": regression_threshold_pct,
+        "regressed": regressed,
+    })
+    return result
+
+
+def evaluate_pending_activation(
+    *,
+    root: Path = Path("."),
+    settings: Optional[Dict[str, Any]] = None,
+    now: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    """Auto-close out the last applied activation once it has aged past
+    `evaluation_cooldown_hours` with no observed error or manual rollback.
+
+    Nothing else in this codebase ever sets `evaluated: true` on an activation
+    record, which makes `cooldown_status()`'s `previous_activation_not_evaluated`
+    blocker permanent after the first-ever apply. This function is the missing
+    review step, using time-elapsed + a cheap health check instead of PnL
+    attribution (which this system has no reliable mechanism for yet). It only
+    ever rewrites the one matching line in the activation log -- never touches
+    Coinbase, `.env`, or the approved profile itself -- and must only be called
+    from within the governor's existing lock (see `run_governor`'s apply=True
+    branch), never from a read-only status/validation path.
+    """
+    current = now or datetime.now(timezone.utc)
+    settings = settings or governor_settings(None)
+    log_path = root / ACTIVATION_LOG_PATH
+    try:
+        lines = log_path.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return {"performed": False, "reason": "no_activation_log"}
+
+    last_idx: Optional[int] = None
+    last_row: Dict[str, Any] = {}
+    for idx in range(len(lines) - 1, -1, -1):
+        try:
+            row = json.loads(lines[idx])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(row, dict) and row.get("applied") is True:
+            last_idx = idx
+            last_row = row
+            break
+    if last_idx is None:
+        return {"performed": False, "reason": "no_applied_activation"}
+    if last_row.get("evaluated") is True:
+        return {"performed": False, "reason": "already_evaluated"}
+
+    last_ts = parse_time(last_row.get("generated_at"))
+    evaluation_hours = int(settings.get("evaluation_cooldown_hours") or 0)
+    if last_ts is None:
+        return {"performed": False, "reason": "activation_missing_timestamp"}
+    if evaluation_hours > 0 and last_ts > current - timedelta(hours=evaluation_hours):
+        return {"performed": False, "reason": "evaluation_cooldown_not_elapsed"}
+
+    profile_path = root / APPROVED_PROFILE_PATH
+    current_hash = sha256_file(profile_path) if profile_path.exists() else ""
+    recorded_hash = str(last_row.get("profile_hash") or "")
+    evaluated_at_iso = now_iso()
+    outcome_assessment: Optional[Dict[str, Any]] = None
+    if recorded_hash and current_hash != recorded_hash:
+        outcome = "superseded_by_manual_rollback"
+    elif _errors_since(root, last_ts):
+        return {"performed": False, "reason": "errors_observed_since_activation"}
+    else:
+        outcome_assessment = assess_activation_outcome(
+            root=root,
+            generated_at=str(last_row.get("generated_at") or ""),
+            evaluated_at=evaluated_at_iso,
+            min_sample_size=int(settings.get("outcome_min_sample_size") or 100),
+            regression_threshold_pct=float(settings.get("outcome_regression_threshold_pct") or 5.0),
+        )
+        if not outcome_assessment.get("regressed"):
+            outcome = "clean_no_errors_observed"
+        elif bool(settings.get("auto_rollback_on_regression")):
+            # A separate, explicitly opt-in switch -- deliberately does not
+            # reuse or bypass the manual rollback_governor_profile() ACK
+            # philosophy; it supplies the same required ACK constant itself
+            # because the operator's consent already happened by turning this
+            # flag on, not by silently defaulting to auto-approval.
+            rollback_env = dict(os.environ)
+            rollback_env["AUTONOMOUS_PARAMETER_GOVERNOR_ROLLBACK_ACK"] = REQUIRED_ROLLBACK_ACK
+            rollback_result = rollback_governor_profile(root=root, env=rollback_env, apply=True)
+            outcome_assessment["auto_rollback_result"] = rollback_result
+            outcome = "regressed_auto_rolled_back" if rollback_result.get("applied") else "regressed_auto_rollback_failed"
+        else:
+            outcome = "regressed_recommend_manual_review"
+
+    last_row.update({
+        "evaluated": True,
+        "evaluated_at": evaluated_at_iso,
+        "evaluation_method": AUTO_EVALUATION_METHOD,
+        "evaluation_outcome": outcome,
+    })
+    if outcome_assessment is not None:
+        last_row["outcome_assessment"] = outcome_assessment
+    lines[last_idx] = json.dumps(last_row, sort_keys=True)
+    atomic_write_text(log_path, "\n".join(lines) + "\n")
+    return {
+        "performed": True,
+        "reason": outcome,
+        "changed_parameter": last_row.get("changed_parameter"),
+        "evaluated_at": last_row.get("evaluated_at"),
+        "outcome_assessment": outcome_assessment,
+    }
+
+
 def cooldown_status(root: Path, settings: Dict[str, Any], *, now: Optional[datetime] = None) -> Dict[str, Any]:
     current = now or datetime.now(timezone.utc)
     activations = _load_activations(root)
@@ -1204,6 +1468,12 @@ def run_governor(
     if env is None:
         load_project_env(root)
     settings = governor_settings(env)
+    if apply:
+        # Both real apply-mode callers (run_governor_cycle and
+        # tools/prepare_growbot_river_governor_candidate.py) already hold
+        # acquire_governor_lock() before reaching here, so this is always
+        # inside the same lock as the rest of this function's writes.
+        evaluate_pending_activation(root=root, settings=settings)
     candidate_payload = candidate if candidate is not None else load_candidate(root)
     plan = build_activation_plan(root=root, env=env, candidate=candidate_payload, readiness_report=readiness_report)
     validation = plan["governor_validation"]
@@ -1279,6 +1549,7 @@ def run_governor(
         }
         atomic_write_json(root / ROLLBACK_PLAN_PATH, rollback_plan)
         atomic_write_json(root / LEGACY_ROLLBACK_PLAN_PATH, rollback_plan)
+        applied_change = changes[0] if changes else {}
         log_path = root / ACTIVATION_LOG_PATH
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with log_path.open("a", encoding="utf-8") as handle:
@@ -1290,6 +1561,8 @@ def run_governor(
                 "evidence_hash": (layers or {}).get("evidence_hash") or validation["candidate_hash"],
                 "profile_hash": new_hash,
                 "changed_parameter": changed_parameters[0] if changed_parameters else "",
+                "changed_parameter_old_value": str(applied_change.get("current_value") or ""),
+                "changed_parameter_new_value": str(applied_change.get("candidate_value") or ""),
             }, sort_keys=True) + "\n")
         result.update({
             "applied": True,
@@ -1351,6 +1624,30 @@ def maybe_run_autonomous_parameter_governor_cycle_hook(root: Path = Path("."), e
     return run_governor(root=root, env=env, apply=False)
 
 
+def _lock_holder_is_dead(pid: Any) -> bool:
+    """Return True only when we can positively prove the lock's PID is not running.
+
+    Unknown/absent PIDs, or PIDs owned by another user, return False so we fall back to
+    time-based staleness rather than stealing a lock we cannot verify is dead. A reused
+    PID reads as "alive" (the safe direction — we will not steal). This closes the gap
+    where a crashed governor process left an orphaned lock blocking all runs for up to
+    LOCK_STALE_AFTER_SECONDS even though nothing was actually running.
+    """
+    try:
+        pid_int = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if pid_int <= 0:
+        return False
+    try:
+        os.kill(pid_int, 0)
+    except ProcessLookupError:
+        return True
+    except (PermissionError, OSError):
+        return False
+    return False
+
+
 def acquire_governor_lock(root: Path = Path("."), *, stale_after_seconds: int = LOCK_STALE_AFTER_SECONDS) -> Dict[str, Any]:
     path = root / LOCK_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1361,10 +1658,17 @@ def acquire_governor_lock(root: Path = Path("."), *, stale_after_seconds: int = 
         except Exception:
             payload = {}
         created = parse_time(payload.get("created_at")) if isinstance(payload, dict) else None
-        stale = created is None or created < now - timedelta(seconds=stale_after_seconds)
+        time_stale = created is None or created < now - timedelta(seconds=stale_after_seconds)
+        pid_dead = _lock_holder_is_dead(payload.get("pid")) if isinstance(payload, dict) else False
+        stale = time_stale or pid_dead
         if not stale:
             return {"acquired": False, "path": str(path), "reason": "skipped_due_to_lock", "stale": False, "lock": payload}
-        stale_payload = {"stale_lock_detected": True, "previous_lock": payload, "replaced_at": now_iso()}
+        stale_payload = {
+            "stale_lock_detected": True,
+            "previous_lock": payload,
+            "replaced_at": now_iso(),
+            "stale_reason": "dead_pid" if pid_dead else "expired",
+        }
     else:
         stale_payload = {"stale_lock_detected": False}
     payload = {"created_at": now_iso(), "pid": os.getpid(), "stale_replaced": stale_payload.get("stale_lock_detected", False)}
@@ -1464,6 +1768,7 @@ __all__ = [
     "candidate_hash_valid",
     "candidate_stale",
     "cooldown_status",
+    "evaluate_pending_activation",
     "governor_settings",
     "load_project_env",
     "load_candidate",

@@ -194,6 +194,15 @@ class BotConfig:
     default_quote_size_usdc: Decimal = field(default_factory=lambda: _get_decimal_env("DEFAULT_QUOTE_SIZE_USDC", "50.00"))
     max_notional_usd: Decimal = field(default_factory=lambda: _get_decimal_env("MAX_NOTIONAL_USD", "100.00"))
     enable_dynamic_entry_sizing: bool = field(default_factory=lambda: _get_bool_env("ENABLE_DYNAMIC_ENTRY_SIZING", True))
+    # Entry sizing is percentage-of-portfolio, not a fixed USDC range: each
+    # live cycle, strategy_engine.py prices total account equity (free USDC +
+    # market value of every held asset) and refreshes min/max_dynamic_entry_quote_usdc
+    # (and the redundant phase_c/autonomous entry caps) to
+    # portfolio_value * {min,max}_position_pct_of_portfolio. The USDC fields
+    # below are only the startup/fallback values used before the first
+    # portfolio pricing succeeds.
+    min_position_pct_of_portfolio: Decimal = field(default_factory=lambda: _get_decimal_env("MIN_POSITION_PCT_OF_PORTFOLIO", "0.10"))
+    max_position_pct_of_portfolio: Decimal = field(default_factory=lambda: _get_decimal_env("MAX_POSITION_PCT_OF_PORTFOLIO", "0.20"))
     min_dynamic_entry_quote_usdc: Decimal = field(default_factory=lambda: _get_decimal_env("MIN_DYNAMIC_ENTRY_QUOTE_USDC", str(MIN_LIVE_ORDER_QUOTE_USDC)))
     max_dynamic_entry_quote_usdc: Decimal = field(default_factory=lambda: _get_decimal_env("MAX_DYNAMIC_ENTRY_QUOTE_USDC", str(MAX_LIVE_ORDER_QUOTE_USDC)))
     max_spread_pct: Decimal = field(default_factory=lambda: _get_decimal_env("MAX_SPREAD_PCT", "0.0100"))
@@ -547,6 +556,11 @@ class BotConfig:
     exit_target_require_fresh_context_when_stop_breached: bool = field(default_factory=lambda: _get_bool_env("EXIT_TARGET_REQUIRE_FRESH_CONTEXT_WHEN_STOP_BREACHED", True))
     exit_target_stale_if_stop_breached: bool = field(default_factory=lambda: _get_bool_env("EXIT_TARGET_STALE_IF_STOP_BREACHED", True))
 
+    # Minimum distance between entry and the position's protective stop.
+    # Enforced in bot/phase_c43_autonomous_entry_live.py::_derive_entry_protective_levels
+    # by widening (never rejecting) any LLM-provided stop tighter than this floor.
+    stop_distance_pct: Decimal = field(default_factory=lambda: _get_decimal_env("STOP_DISTANCE_PCT", "0.0200"))
+
     order_store_max_records: int = field(default_factory=lambda: _get_int_env("ORDER_STORE_MAX_RECORDS", "2000"))
     enable_paper_no_fill_followup_analysis: bool = field(default_factory=lambda: _get_bool_env("ENABLE_PAPER_NO_FILL_FOLLOWUP_ANALYSIS", True))
     paper_no_fill_followup_min_move_pct: Decimal = field(default_factory=lambda: _get_decimal_env("PAPER_NO_FILL_FOLLOWUP_MIN_MOVE_PCT", "0.0050"))
@@ -610,6 +624,9 @@ class BotConfig:
             "PHASE_D2_MIN_REWARD_TO_FEE_RATIO": "phase_d2_min_reward_to_fee_ratio",
             "PHASE_D2_MIN_REWARD_TO_RISK_RATIO": "phase_d2_min_reward_to_risk_ratio",
             "EXIT_TARGET_MAX_DISTANCE_FROM_MID_PCT": "exit_target_max_distance_from_mid_pct",
+            "STOP_DISTANCE_PCT": "stop_distance_pct",
+            "PHASE_D2_DEFAULT_TRAILING_ACTIVATION_PCT": "phase_d2_default_trailing_activation_pct",
+            "PHASE_D2_DEFAULT_TRAILING_DISTANCE_PCT": "phase_d2_default_trailing_distance_pct",
             "SMALL_PROBE_TC_VOL_15M_MIN": "small_probe_tc_vol_15m_min",
             "SMALL_PROBE_TC_VOL_1H_MIN": "small_probe_tc_vol_1h_min",
             "SMALL_PROBE_RC_VOL_15M_MIN": "small_probe_rc_vol_15m_min",
@@ -696,6 +713,13 @@ class BotConfig:
             raise ValueError("MIN_DYNAMIC_ENTRY_QUOTE_USDC moet >= MIN_LIVE_ORDER_QUOTE_USDC zijn")
         if self.max_dynamic_entry_quote_usdc > self.max_live_order_quote_usdc:
             raise ValueError("MAX_DYNAMIC_ENTRY_QUOTE_USDC moet <= MAX_LIVE_ORDER_QUOTE_USDC zijn")
+
+        if self.min_position_pct_of_portfolio <= Decimal("0"):
+            raise ValueError("MIN_POSITION_PCT_OF_PORTFOLIO moet > 0 zijn")
+        if self.max_position_pct_of_portfolio > Decimal("1"):
+            raise ValueError("MAX_POSITION_PCT_OF_PORTFOLIO moet <= 1 (100%) zijn")
+        if self.min_position_pct_of_portfolio > self.max_position_pct_of_portfolio:
+            raise ValueError("MIN_POSITION_PCT_OF_PORTFOLIO moet <= MAX_POSITION_PCT_OF_PORTFOLIO zijn")
 
         if self.max_spread_pct <= Decimal("0"):
             raise ValueError("MAX_SPREAD_PCT moet > 0 zijn")
@@ -1034,8 +1058,14 @@ class BotConfig:
                 raise ValueError("ENABLE_FULL_WORKFLOW_LIVE_MODE vereist AUTONOMOUS_MAX_ORDER_QUOTE<=100.00")
             if not self.enable_dynamic_entry_sizing:
                 raise ValueError("ENABLE_FULL_WORKFLOW_LIVE_MODE vereist ENABLE_DYNAMIC_ENTRY_SIZING=true")
+            # Checks the constructed/env-configured startup fallback only.
+            # strategy_engine.py overwrites min/max_dynamic_entry_quote_usdc
+            # (and phase_c_max_order_quote/autonomous_max_order_quote) on
+            # self.cfg once per live cycle, after validate() has already run,
+            # to portfolio_value_usdc * {min,max}_position_pct_of_portfolio --
+            # that per-cycle override is the actual live entry-sizing policy.
             if self.min_dynamic_entry_quote_usdc != Decimal("50.00") or self.max_dynamic_entry_quote_usdc != Decimal("100.00"):
-                raise ValueError("ENABLE_FULL_WORKFLOW_LIVE_MODE vereist MIN/MAX_DYNAMIC_ENTRY_QUOTE_USDC=50/100")
+                raise ValueError("ENABLE_FULL_WORKFLOW_LIVE_MODE vereist MIN/MAX_DYNAMIC_ENTRY_QUOTE_USDC=50/100 as the startup fallback")
             required_true = {
                 "ENABLE_LIVE_ENTRY_ORDERS": self.enable_live_entry_orders,
                 "ENABLE_LIVE_LIMIT_ORDERS": self.enable_live_limit_orders,
@@ -1460,6 +1490,8 @@ class BotConfig:
             "controlled_stop_exit_max_slippage_pct": str(self.controlled_stop_exit_max_slippage_pct),
             "enable_autonomous_small_live_orderbook_mode": self.enable_autonomous_small_live_orderbook_mode,
             "enable_dynamic_entry_sizing": self.enable_dynamic_entry_sizing,
+            "min_position_pct_of_portfolio": str(self.min_position_pct_of_portfolio),
+            "max_position_pct_of_portfolio": str(self.max_position_pct_of_portfolio),
             "min_dynamic_entry_quote_usdc": str(self.min_dynamic_entry_quote_usdc),
             "max_dynamic_entry_quote_usdc": str(self.max_dynamic_entry_quote_usdc),
             "autonomous_max_order_quote": str(self.autonomous_max_order_quote),

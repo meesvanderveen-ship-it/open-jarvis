@@ -33,11 +33,22 @@ class PositionAction:
 
 
 class PositionManager:
-    def __init__(self):
+    def __init__(self, cfg: Any = None):
         self.min_position_base = Decimal("0.00000001")
         self.min_reduce_fraction = Decimal("0.50")
-        self.default_trailing_trigger_pct = Decimal("0.02")
-        self.default_trailing_distance_pct = Decimal("0.03")
+        # Generic (no setup-type match) trailing tier only -- the
+        # trend/reclaim/mean-reversion tiers below stay independent of cfg.
+        # cfg is the single source of truth when available (it already backs
+        # the D.2 plan preview's "trailing" field, bot/phase_d2_position_executor.py,
+        # so this makes position_manager.py's actual enforcement consistent
+        # with what a plan already claims to use, instead of a second,
+        # silently different hardcoded value).
+        self.default_trailing_trigger_pct = self._to_decimal(
+            getattr(cfg, "phase_d2_default_trailing_activation_pct", None), "0.02"
+        )
+        self.default_trailing_distance_pct = self._to_decimal(
+            getattr(cfg, "phase_d2_default_trailing_distance_pct", None), "0.03"
+        )
         self.default_take_profit_reduce_fraction = Decimal("0.50")
 
         # Nieuwe, behoudende setup-aware defaults
@@ -197,9 +208,20 @@ class PositionManager:
         }
         return aliases.get(raw, "unclear")
 
+    # state_store.py unconditionally back-fills every position with
+    # "trailing_trigger_pct": "0.02" / "trailing_distance_pct": "0.03" at
+    # creation and on every defaults-ensure pass (it has no cfg access and
+    # never did) -- so those two exact legacy values mean "never actually
+    # customized," not "a deliberate per-position override." Treating them
+    # as real overrides would make the setup-type tiers below (and the
+    # cfg-backed generic default) permanently unreachable for every position,
+    # which is what happened before this fix.
+    _LEGACY_BACKFILLED_TRIGGER_PCT = Decimal("0.02")
+    _LEGACY_BACKFILLED_DISTANCE_PCT = Decimal("0.03")
+
     def _get_setup_trailing_trigger_pct(self, position: Dict[str, Any]) -> Decimal:
         custom = self._to_decimal(position.get("trailing_trigger_pct"), "0")
-        if custom > Decimal("0"):
+        if custom > Decimal("0") and custom != self._LEGACY_BACKFILLED_TRIGGER_PCT:
             return custom
 
         setup_type = self._get_position_setup_type(position)
@@ -213,7 +235,7 @@ class PositionManager:
 
     def _get_setup_trailing_distance_pct(self, position: Dict[str, Any]) -> Decimal:
         custom = self._to_decimal(position.get("trailing_distance_pct"), "0")
-        if custom > Decimal("0"):
+        if custom > Decimal("0") and custom != self._LEGACY_BACKFILLED_DISTANCE_PCT:
             return custom
 
         setup_type = self._get_position_setup_type(position)
@@ -370,6 +392,21 @@ class PositionManager:
 
         if not updated_position.get("position_plan_status"):
             updated_position["position_plan_status"] = "initialized_in_position_manager"
+
+        # state_store.py backfills these to a literal "pending" once at position
+        # creation and nothing else in the codebase ever updates them (confirmed
+        # by grep) -- so they sit on "pending" forever even though, by this
+        # point, stop/take-profit/trailing/invalidation are all defined and
+        # every cycle actively re-evaluates them (see evaluate_position below).
+        # An eternal "pending" reads as "no exit plan was ever made" on the
+        # dashboard, which is wrong; reflect that a concrete plan exists and is
+        # under reactive monitoring. _maybe_route_full_workflow_position_exit_to_d3
+        # (strategy_engine.py) advances d3_exit_status further once a real
+        # close/reduce is actually submitted.
+        if updated_position.get("d2_plan_status") in (None, "", "pending"):
+            updated_position["d2_plan_status"] = "plan_defined"
+        if updated_position.get("d3_exit_status") in (None, "", "pending"):
+            updated_position["d3_exit_status"] = "monitoring_no_trigger_yet"
 
         return updated_position
 

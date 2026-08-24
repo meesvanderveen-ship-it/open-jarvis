@@ -1,6 +1,6 @@
 {
-  "name": "shadcn-admin",
-  "private": false,
+  "name": "tradingbot-control-center",
+  "private": true,
   "version": "2.2.1",
   "type": "module",
   "scripts": {

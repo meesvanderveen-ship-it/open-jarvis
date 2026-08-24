@@ -210,3 +210,57 @@ def test_successful_fake_cancel_replace_updates_local_state(tmp_path, monkeypatc
     assert orders.get_order("old-client")["status"] == "cancelled"
     assert orders.get_order(report["replacement_client_order_id"])["status"] == "submitted"
     assert state.get_position("BTC-USDC")["reserved_base_open_exit_orders"] == "0.00006490"
+
+
+class TransientThenCancelledClient(FakeClient):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.get_order_call_count = 0
+
+    def get_order(self, order_id):
+        self.get_order_call_count += 1
+        if self.get_order_call_count < 3:
+            return {
+                "order": {
+                    "order_id": order_id,
+                    "status": "OPEN",
+                    "filled_size": "0",
+                    "filled_value": "0",
+                    "average_filled_price": "0",
+                    "number_of_fills": "0",
+                    "product_id": "BTC-USDC",
+                    "side": "SELL",
+                }
+            }
+        return super().get_order(order_id)
+
+
+def test_retries_cancel_confirmation_past_transient_open_status(tmp_path, monkeypatch):
+    # Regression test for the same race-condition class fixed live 2026-07-08 in
+    # the sibling controlled stop-exit path: a cancel confirmation lookup taken
+    # immediately after cancel_order can read back a transient non-terminal
+    # status before Coinbase's backend settles. A brief retry must pick up the
+    # real terminal status instead of blocking a valid replacement.
+    state = _state(tmp_path, monkeypatch)
+    orders = _orders(tmp_path)
+    client = TransientThenCancelledClient()
+    report = build_phase_d3_tpclose_reprice_scaffold_report(
+        cfg=_cfg(),
+        ticker="BTC-USDC",
+        client_order_id="old-client",
+        exchange_order_id="old-exchange",
+        linked_position_id="pos-1",
+        new_limit_price="74000.00",
+        state_store=state,
+        order_store=orders,
+        coinbase_client=client,
+        old_snapshot=_snapshot(),
+        submit_live=True,
+        reprice_ack=TPCLOSE_REPRICE_ACK,
+        confirm_label="TP_CLOSE",
+        cancel_confirmation_retry_seconds=0,
+    )
+
+    assert client.get_order_call_count == 3
+    assert report["status"] == "tpclose_reprice_replacement_submitted"
+    assert report["cancel_confirmed_terminal"] is True

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import time
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from typing import Any, Dict, Optional
@@ -147,6 +148,8 @@ def build_phase_d3_tpclose_reprice_scaffold_report(
     submit_live: bool = False,
     reprice_ack: str = "",
     confirm_label: str = "",
+    cancel_confirmation_max_attempts: int = 4,
+    cancel_confirmation_retry_seconds: float = 0.75,
 ) -> Dict[str, Any]:
     selected_ticker = _normalize_ticker(ticker)
     store = order_store or OrderStore()
@@ -300,16 +303,34 @@ def build_phase_d3_tpclose_reprice_scaffold_report(
         report["blockers"] = ["cancel_response_not_confirmed"]
         return _json_safe(report)
 
+    # A cancel resolves near-instantly on Coinbase's matching engine, but a
+    # snapshot lookup taken immediately after can still race ahead of
+    # settlement (confirmed live 2026-07-08 in the sibling controlled stop-exit
+    # path: an order that had actually filled completely was read back as
+    # "OPEN" moments after submit). Retry briefly while the status is still
+    # non-terminal before accepting it as final -- this only reduces false
+    # "not terminal, re-run manually" blocks; it does not weaken the existing
+    # fill-evidence check below (which correctly halts on ANY zero_fill=False
+    # reading, terminal or not, rather than assuming that's also transient).
+    terminal_cancel_statuses = {"cancelled", "canceled", "expired", "rejected"}
+    cancel_snapshot: Dict[str, Any] = {}
+    attempts = max(1, int(cancel_confirmation_max_attempts))
     try:
-        cancel_snapshot = fetch_coinbase_order_snapshot(
-            coinbase_client=client,
-            order_id=exchange_order_id,
-            local_order=order,
-            include_fills=True,
-        )
+        for attempt in range(attempts):
+            cancel_snapshot = fetch_coinbase_order_snapshot(
+                coinbase_client=client,
+                order_id=exchange_order_id,
+                local_order=order,
+                include_fills=True,
+            )
+            cancel_status = _snapshot_status(cancel_snapshot)
+            if cancel_status in terminal_cancel_statuses or not _snapshot_zero_fill(cancel_snapshot):
+                break
+            if attempt < attempts - 1:
+                time.sleep(max(0.0, float(cancel_confirmation_retry_seconds)))
         cancel_status = _snapshot_status(cancel_snapshot)
         report["cancel_confirmation_status"] = cancel_status
-        report["cancel_confirmed_terminal"] = cancel_status in {"cancelled", "canceled", "expired", "rejected"}
+        report["cancel_confirmed_terminal"] = cancel_status in terminal_cancel_statuses
         if not _snapshot_zero_fill(cancel_snapshot):
             report["blockers"] = ["cancel_confirmation_has_fill_evidence"]
             report["status"] = "tpclose_reprice_cancel_confirmed_fill_evidence_no_replace"

@@ -288,6 +288,7 @@ def _record_llm_cost(
     try:
         input_tokens = None
         output_tokens = None
+        cached_tokens = None
         if usage is not None:
             input_tokens = getattr(usage, "input_tokens", None)
             if input_tokens is None:
@@ -295,6 +296,11 @@ def _record_llm_cost(
             output_tokens = getattr(usage, "output_tokens", None)
             if output_tokens is None:
                 output_tokens = getattr(usage, "completion_tokens", None)
+            input_tokens_details = getattr(usage, "input_tokens_details", None)
+            if input_tokens_details is None:
+                input_tokens_details = getattr(usage, "prompt_tokens_details", None)
+            if input_tokens_details is not None:
+                cached_tokens = getattr(input_tokens_details, "cached_tokens", None)
         record_llm_call(
             provider=provider,
             model=model,
@@ -303,6 +309,7 @@ def _record_llm_cost(
             attempt=attempt,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
+            cached_tokens=cached_tokens,
             latency_ms=latency_ms,
             call_outcome=call_outcome,
             error_type=error_type,
@@ -608,6 +615,7 @@ class ResilientLLMClient:
         drop_unknown_keys: bool = False,
         required_keys: Optional[Sequence[str]] = None,
         normalize_final_judge_aliases: bool = False,
+        payload_first: bool = False,
     ) -> Dict[str, Any]:
         model_name = model or self.cfg.openai_model
 
@@ -616,12 +624,24 @@ class ResilientLLMClient:
             text = ""
             attempt_started = time.monotonic()
             try:
+                payload_content = json.dumps(compact_payload_for_llm(payload, self.cfg), ensure_ascii=False)
+                if payload_first:
+                    # Stable/shared content first so it forms a reusable cache prefix;
+                    # the small call-specific instruction goes last so only that tail
+                    # varies across calls that share the same payload (see specialist
+                    # calls in strategy_engine._safe_module_response).
+                    input_messages = [
+                        {"role": "user", "content": payload_content},
+                        {"role": "system", "content": system_prompt},
+                    ]
+                else:
+                    input_messages = [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": payload_content},
+                    ]
                 response = self.client.responses.create(
                     model=model_name,
-                    input=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": json.dumps(compact_payload_for_llm(payload, self.cfg), ensure_ascii=False)},
-                    ],
+                    input=input_messages,
                 )
 
                 text = getattr(response, "output_text", None) or ""

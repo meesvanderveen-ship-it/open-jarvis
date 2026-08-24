@@ -6,6 +6,7 @@ from bot.phase_d2_position_executor import (
     D2_PLAN_STATUS_NO_POSITION,
     D2_PLAN_STATUS_READY,
     assess_minimum_net_edge,
+    build_d2_exit_market_context,
     build_d2_plan_fingerprint,
     build_multi_exit_bracket_lite_plan,
     build_phase_d2_position_executor_report,
@@ -202,3 +203,60 @@ def json_clone(value):
     import json
 
     return json.loads(json.dumps(value))
+
+
+def test_build_d2_exit_market_context_empty_without_client():
+    assert build_d2_exit_market_context("BTC-USDC") == {}
+
+
+def test_build_d2_exit_market_context_fails_safe_on_market_data_error(monkeypatch):
+    class BoomMarketDataService:
+        def __init__(self, client):
+            pass
+
+        def build_feature_pack(self, ticker):
+            raise RuntimeError("no candles available")
+
+    monkeypatch.setattr("bot.market_data.MarketDataService", BoomMarketDataService)
+    assert build_d2_exit_market_context("BTC-USDC", coinbase_client=object()) == {}
+
+
+def test_build_d2_exit_market_context_extracts_resistance_and_support(monkeypatch):
+    class FakeMarketDataService:
+        def __init__(self, client):
+            self.client = client
+
+        def build_feature_pack(self, ticker):
+            return {"ticker": ticker, "structure": {"nearest_resistance": 0.30, "nearest_support": 0.24}}
+
+    monkeypatch.setattr("bot.market_data.MarketDataService", FakeMarketDataService)
+    context = build_d2_exit_market_context("ADA-USDC", coinbase_client=object())
+    assert context["nearest_resistance"] == 0.30
+    assert context["nearest_support"] == 0.24
+    assert context["market_structure"]["resistance_level"] == 0.30
+    assert context["market_structure"]["support_level"] == 0.24
+
+
+def test_market_context_resistance_target_used_over_position_fallback():
+    # Real SOL-USDC-shaped gap: the static position take_profit_price (a fixed
+    # 2x-risk multiple) is too close to clear the fee-edge gate, but live
+    # resistance sits far enough away to clear it comfortably.
+    report = build_phase_d2_position_executor_report(
+        cfg=_cfg(),
+        ticker="ADA-USDC",
+        position=_position(take_profit_price="0.2550"),  # too close: would stay blocked
+        market_context={"nearest_resistance": "0.30", "nearest_support": "0.24"},
+    )
+    assert report["status"] == D2_PLAN_STATUS_READY
+    assert report["plan"]["exit_target_source_policy"]["target_source"] == "indicator_resistance_target"
+    assert report["plan"]["exit_target_source_policy"]["used_market_context"] is True
+
+
+def test_market_context_missing_still_falls_back_to_position_take_profit_price():
+    report = build_phase_d2_position_executor_report(
+        cfg=_cfg(),
+        ticker="ADA-USDC",
+        position=_position(take_profit_price="0.2550"),
+    )
+    assert report["plan"]["exit_target_source_policy"]["target_source"] == "position_take_profit_price"
+    assert report["plan"]["exit_target_source_policy"]["used_market_context"] is False

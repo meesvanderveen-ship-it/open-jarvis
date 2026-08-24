@@ -103,6 +103,27 @@ class _RejectLiveClient:
     def place_market_order(self, *args, **kwargs):
         raise AssertionError("submit must not be called")
 
+    def place_limit_order_ioc(self, *, ticker, side, base_size, limit_price, client_order_id=None):
+        # Mirrors the real CoinbaseClient.place_limit_order_ioc: build the
+        # sor_limit_ioc payload and delegate to self._request, so subclasses
+        # only need to override _request (as they already do) rather than
+        # duplicating a second payload/response shape here.
+        return self._request(
+            "POST",
+            "/api/v3/brokerage/orders",
+            payload={
+                "client_order_id": client_order_id,
+                "product_id": ticker,
+                "side": side,
+                "order_configuration": {
+                    "sor_limit_ioc": {
+                        "base_size": format(base_size, "f"),
+                        "limit_price": format(limit_price, "f"),
+                    }
+                },
+            },
+        )
+
 
 class _CancelOnlyClient(_RejectLiveClient):
     def __init__(self):

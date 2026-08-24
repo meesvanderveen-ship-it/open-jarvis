@@ -1,6 +1,12 @@
 import { useQuery } from '@tanstack/react-query'
 import { apiClient } from '@/lib/api-client'
 
+export type Proximity = {
+  score: number
+  zone: 'red' | 'orange' | 'green'
+  conditions: string[]
+}
+
 export type Opportunity = {
   ticker: string
   created_at?: string
@@ -21,6 +27,7 @@ export type Opportunity = {
   }
   chart_patterns?: { best_pattern_score?: number; pattern_bias?: string; summary?: string }
   opportunity_score?: number | null
+  proximity?: Proximity | null
   reason?: string
   setup_type?: string
 }

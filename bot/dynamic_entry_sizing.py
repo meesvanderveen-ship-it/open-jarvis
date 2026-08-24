@@ -1,9 +1,21 @@
-"""Deterministic 50--100 USDC sizing for live BUY entries.
+"""Deterministic 10--20%-of-portfolio sizing for live BUY entries.
 
 The final judge may describe a setup and its confidence, but it never chooses
 the submitted notional.  This module turns the already-available analysis and
 execution context into a bounded quote amount.  It is deliberately pure so the
 same input produces the same sizing report in previews, guards and submits.
+
+The bounds are a percentage of total account equity (portfolio_value_usdc:
+free USDC cash plus the market value of every held asset, priced fresh once
+per cycle by strategy_engine.py), not a fixed USDC range -- a bigger account
+sizes bigger trades automatically, a smaller one sizes smaller. Everything
+between the bounds is still the same deterministic quality score this module
+always computed (confidence/edge/orderbook/spread/setup/trend/learning
+signals); that score used to be added as small USDC deltas onto a fixed
+50 USDC floor, calibrated against a fixed 50 USDC span (50 to 100). It's now
+expressed as a 0..1 fraction of that same calibration span and applied to
+today's actual span (max_quote - min_quote in USDC) so the scoring logic
+itself didn't need to be re-tuned for the new range.
 """
 
 from __future__ import annotations
@@ -13,8 +25,19 @@ from typing import Any, Dict, Iterable, Optional
 
 
 ZERO = Decimal("0")
+# Legacy fixed-USDC fallback, used only before the first successful
+# per-cycle portfolio pricing (e.g. at startup, or if a Coinbase balance
+# fetch fails) -- see calculate_dynamic_entry_quote's portfolio_value_usdc
+# handling below for the actual live policy.
 ENTRY_MIN_QUOTE = Decimal("50.00")
 ENTRY_MAX_QUOTE = Decimal("100.00")
+DEFAULT_MIN_POSITION_PCT_OF_PORTFOLIO = Decimal("0.10")
+DEFAULT_MAX_POSITION_PCT_OF_PORTFOLIO = Decimal("0.20")
+# The quality-score components below were tuned against the historical fixed
+# 50-USDC span (100 - 50). Kept as the calibration denominator so the same
+# tuned weights translate into a 0..1 fraction of *today's* span, whatever
+# that span is now in percentage-of-portfolio terms.
+_QUALITY_SCORE_CALIBRATION_SPAN = Decimal("50")
 
 
 def _decimal(value: Any, default: str = "0") -> Decimal:
@@ -131,6 +154,9 @@ def calculate_dynamic_entry_quote(
     trend_alignment: Any = None,
     market_regime: Any = None,
     available_quote_balance: Any = None,
+    portfolio_value_usdc: Any = None,
+    min_pct: Any = None,
+    max_pct: Any = None,
     min_quote: Any = None,
     max_quote: Any = None,
     product_min_quote: Any = None,
@@ -139,7 +165,14 @@ def calculate_dynamic_entry_quote(
 
     Missing optional context contributes zero; it cannot manufacture a positive
     signal.  Missing/insufficient balance and a product minimum above the BUY
-    cap block the entry instead of silently shrinking it below 50 USDC.
+    cap block the entry instead of silently shrinking it below the portfolio
+    minimum.
+
+    min_quote/max_quote, when explicitly passed, force fixed USDC rails
+    (bypassing the portfolio-percentage calculation entirely) -- kept for
+    callers/tests that want to pin exact dollar bounds. The live callers
+    (phase_c43_autonomous_entry_live.py, order_plan.py) never pass them, so
+    normal operation always sizes off portfolio_value_usdc.
     """
     analysis = _dict(analysis)
     execution_plan = _dict(execution_plan)
@@ -152,19 +185,37 @@ def calculate_dynamic_entry_quote(
         orderbook = _dict(feature_pack.get("orderbook_context")) or _dict(feature_pack.get("orderbook_summary"))
     rules = _dict(product_rules) or _dict(decision_context.get("product_rules")) or _dict(feature_pack.get("product_rules"))
 
-    configured_min = _decimal(
-        min_quote if min_quote is not None else getattr(cfg, "min_dynamic_entry_quote_usdc", getattr(cfg, "min_live_order_quote_usdc", ENTRY_MIN_QUOTE)),
-        str(ENTRY_MIN_QUOTE),
+    explicit_dollar_rails = min_quote is not None or max_quote is not None
+    portfolio_value = _decimal(
+        portfolio_value_usdc if portfolio_value_usdc is not None else _nested(feature_pack, "risk_context").get("portfolio_value_usdc"),
+        "-1",
     )
-    configured_max = _decimal(
-        max_quote if max_quote is not None else getattr(cfg, "max_dynamic_entry_quote_usdc", getattr(cfg, "max_live_order_quote_usdc", ENTRY_MAX_QUOTE)),
-        str(ENTRY_MAX_QUOTE),
+    min_pct_value = _decimal(
+        min_pct if min_pct is not None else getattr(cfg, "min_position_pct_of_portfolio", DEFAULT_MIN_POSITION_PCT_OF_PORTFOLIO),
+        str(DEFAULT_MIN_POSITION_PCT_OF_PORTFOLIO),
     )
-    phase_cap = _decimal(getattr(cfg, "phase_c_max_order_quote", configured_max), str(configured_max))
-    autonomous_cap = _decimal(getattr(cfg, "autonomous_max_order_quote", configured_max), str(configured_max))
-    notional_cap = _decimal(getattr(cfg, "max_notional_usd", configured_max), str(configured_max))
-    minimum = max(ENTRY_MIN_QUOTE, configured_min)
-    maximum = min(ENTRY_MAX_QUOTE, configured_max, phase_cap, autonomous_cap, notional_cap)
+    max_pct_value = _decimal(
+        max_pct if max_pct is not None else getattr(cfg, "max_position_pct_of_portfolio", DEFAULT_MAX_POSITION_PCT_OF_PORTFOLIO),
+        str(DEFAULT_MAX_POSITION_PCT_OF_PORTFOLIO),
+    )
+
+    portfolio_priced = not explicit_dollar_rails and portfolio_value >= ZERO
+    if portfolio_priced:
+        minimum = portfolio_value * min_pct_value
+        maximum = portfolio_value * max_pct_value
+    else:
+        # No live portfolio pricing available this call (explicit dollar
+        # rails requested, or portfolio pricing hasn't succeeded yet this
+        # cycle/at startup) -- fall back to the configured USDC rails rather
+        # than sizing off an unknown/zero portfolio value.
+        minimum = _decimal(
+            min_quote if min_quote is not None else getattr(cfg, "min_dynamic_entry_quote_usdc", getattr(cfg, "min_live_order_quote_usdc", ENTRY_MIN_QUOTE)),
+            str(ENTRY_MIN_QUOTE),
+        )
+        maximum = _decimal(
+            max_quote if max_quote is not None else getattr(cfg, "max_dynamic_entry_quote_usdc", getattr(cfg, "max_live_order_quote_usdc", ENTRY_MAX_QUOTE)),
+            str(ENTRY_MAX_QUOTE),
+        )
     product_min = _decimal(
         product_min_quote if product_min_quote is not None else _first(rules, "quote_min_size", "quote_min", "min_market_funds"),
         "0",
@@ -266,7 +317,23 @@ def calculate_dynamic_entry_quote(
     neural_adjustment = Decimal("-8") if any(token in neural_text for token in ("prefer_no_trade", "no_trade", "avoid")) else (Decimal("-4") if "bear" in neural_text or "caution" in neural_text else ZERO)
     learning_adjustment = max(Decimal("-10"), min(Decimal("8"), reflection_adjustment + outcomes_adjustment + adaptive_adjustment + neural_adjustment + market_adjustment))
 
-    raw_quote = minimum + confidence_component + edge_component + reward_to_fee_component + reward_to_risk_component + orderbook_component + spread_penalty + slippage_penalty + setup_component + trend_component + support_resistance_component + regime_penalty + learning_adjustment
+    # Every signal above is still summed exactly as before -- only what it's
+    # applied to has changed. Historically these were USDC deltas added onto
+    # a fixed 50 USDC floor, tuned so the sum spans roughly the fixed 50-100
+    # USDC range. Read as a fraction of that same calibration span (0..1) and
+    # applied to today's actual span (maximum - minimum, now in
+    # percentage-of-portfolio USDC terms), the tuned weights carry over
+    # unchanged: a top-quality setup still gets sized at the top of the
+    # configured range, a marginal one at the bottom, regardless of the
+    # portfolio's absolute size.
+    component_total = (
+        confidence_component + edge_component + reward_to_fee_component + reward_to_risk_component
+        + orderbook_component + spread_penalty + slippage_penalty + setup_component + trend_component
+        + support_resistance_component + regime_penalty + learning_adjustment
+    )
+    quality_fraction = max(ZERO, min(ONE, component_total / _QUALITY_SCORE_CALIBRATION_SPAN))
+    span = maximum - minimum
+    raw_quote = minimum + quality_fraction * span
     calculated_quote = raw_quote.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     clamped_quote = max(effective_minimum, min(maximum, calculated_quote)) if maximum >= effective_minimum else ZERO
 
@@ -275,10 +342,12 @@ def calculate_dynamic_entry_quote(
         "-1",
     )
     blockers: list[str] = []
-    if configured_min < ENTRY_MIN_QUOTE:
-        blockers.append("dynamic_entry_min_below_50_usdc")
-    if configured_max > ENTRY_MAX_QUOTE:
-        blockers.append("dynamic_entry_max_above_100_usdc")
+    if min_pct_value <= ZERO:
+        blockers.append("min_position_pct_of_portfolio_not_positive")
+    if max_pct_value > ONE:
+        blockers.append("max_position_pct_of_portfolio_above_100_pct")
+    if min_pct_value > max_pct_value:
+        blockers.append("min_position_pct_of_portfolio_above_max")
     if maximum < effective_minimum:
         blockers.append("product_or_configured_minimum_exceeds_dynamic_entry_cap")
     if balance >= ZERO and balance < effective_minimum:
@@ -286,10 +355,10 @@ def calculate_dynamic_entry_quote(
     if blockers:
         clamped_quote = ZERO
 
-    component_total = raw_quote - minimum
     final_reason = (
-        f"deterministic_dynamic_entry_sizing: base={minimum:.2f}; "
-        f"quality_adjustment={component_total:.2f}; final={clamped_quote:.2f}; "
+        f"deterministic_dynamic_entry_sizing: portfolio_priced={portfolio_priced}; "
+        f"min={minimum:.2f}; max={maximum:.2f}; quality_fraction={quality_fraction:.4f}; "
+        f"final={clamped_quote:.2f}; "
         f"confidence={confidence_component:.2f}; edge={edge_component:.2f}; "
         f"reward_fee={reward_to_fee_component:.2f}; reward_risk={reward_to_risk_component:.2f}; "
         f"orderbook={orderbook_component:.2f}; learning={learning_adjustment:.2f}"
@@ -298,6 +367,11 @@ def calculate_dynamic_entry_quote(
         "enabled": True,
         "accepted": not blockers,
         "blockers": blockers,
+        "portfolio_priced": portfolio_priced,
+        "portfolio_value_usdc": str(portfolio_value) if portfolio_value >= ZERO else None,
+        "min_position_pct_of_portfolio": str(min_pct_value),
+        "max_position_pct_of_portfolio": str(max_pct_value),
+        "quality_fraction": str(quality_fraction.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)),
         "min_quote": str(effective_minimum),
         "max_quote": str(maximum),
         "base_quote": str(minimum),
@@ -333,4 +407,10 @@ def calculate_dynamic_entry_quote(
     }
 
 
-__all__ = ["ENTRY_MAX_QUOTE", "ENTRY_MIN_QUOTE", "calculate_dynamic_entry_quote"]
+__all__ = [
+    "ENTRY_MAX_QUOTE",
+    "ENTRY_MIN_QUOTE",
+    "DEFAULT_MIN_POSITION_PCT_OF_PORTFOLIO",
+    "DEFAULT_MAX_POSITION_PCT_OF_PORTFOLIO",
+    "calculate_dynamic_entry_quote",
+]
