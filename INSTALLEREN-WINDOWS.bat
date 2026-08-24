@@ -189,27 +189,47 @@ echo [6/7] Je API-sleutels instellen...
 echo.
 echo   Houd twee dingen bij de hand:
 echo     - je OpenAI API key    (platform.openai.com/api-keys)
-echo     - je Coinbase JSON-bestand met "name" en "privateKey"
+echo     - het Coinbase JSON-bestand dat je hebt gedownload
 echo.
-echo   Wat je typt of plakt blijft onzichtbaar. Dat hoort zo.
-echo   Plakken doe je met een rechtermuisklik.
+echo   De OpenAI-sleutel plak je met een rechtermuisklik. Je ziet
+echo   sterretjes verschijnen; de sleutel zelf blijft onzichtbaar.
+echo.
+echo   Voor Coinbase wordt om het JSON-BESTAND gevraagd. Sleep dat
+echo   bestand in dit venster of plak het pad. Dat is betrouwbaarder
+echo   dan de sleutel plakken: een privateKey staat op meerdere
+echo   regels en overleeft plakken in een consolevenster niet.
 echo.
 pause
 echo.
+
+:SLEUTELS
 "%VENV_PY%" -m tools.setup_wizard
-if errorlevel 1 (
-    echo.
-    echo ============================================================
-    echo   INSTALLATIE NIET COMPLEET
-    echo.
-    echo   De sleutels zijn nog niet allemaal goed ingesteld.
-    echo   Hierboven staat precies wat er mist.
-    echo   Start dit bestand opnieuw om het te herstellen.
-    echo ============================================================
-    echo.
-    pause
-    exit /b 1
-)
+if not errorlevel 1 goto SLEUTELS_KLAAR
+
+echo.
+echo   ------------------------------------------------------------
+echo   De sleutels zijn nog niet allemaal goed ingesteld.
+echo   Hierboven staat precies wat er mist.
+echo   ------------------------------------------------------------
+echo.
+set "NOGMAALS="
+set /p "NOGMAALS=  Meteen opnieuw proberen? (J/N): "
+echo.
+if /i "!NOGMAALS!"=="J" goto SLEUTELS
+
+echo.
+echo ============================================================
+echo   INSTALLATIE NIET COMPLEET
+echo.
+echo   Alles behalve de sleutels staat klaar. Je hoeft de
+echo   installatie niet opnieuw te doen; start dit bestand opnieuw
+echo   en de eerdere stappen worden overgeslagen.
+echo ============================================================
+echo.
+pause
+exit /b 1
+
+:SLEUTELS_KLAAR
 echo.
 
 REM ===============================================================

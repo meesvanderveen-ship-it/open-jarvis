@@ -647,3 +647,165 @@ def test_coinbase_server_error_is_not_blamed_on_the_key():
 
     assert check.status == STATUS_UNKNOWN
     assert check.facts["http_status"] == 503
+
+
+# ---------------------------------------------------------------------------
+# Windows-invoer: geplakte sleutels
+# ---------------------------------------------------------------------------
+
+
+class _FakeWindowsConsole:
+    """De consolebuffer van cmd.exe, genoeg om msvcrt na te bootsen.
+
+    Rechtermuisklik-plakken schuift de klembordinhoud er in één keer in,
+    inclusief het CRLF dat aan gekopieerde tekst vastzit.
+    """
+
+    def __init__(self, pasted: list[str]) -> None:
+        self.pending = list("".join(value + "\r\n" for value in pasted))
+        self.echoed: list[str] = []
+
+    def kbhit(self) -> bool:
+        return bool(self.pending)
+
+    def getwch(self) -> str:
+        return self.pending.pop(0) if self.pending else "\r"
+
+    def ungetwch(self, char: str) -> None:
+        self.pending.insert(0, char)
+
+    def putwch(self, char: str) -> None:
+        self.echoed.append(char)
+
+
+def test_pasted_secrets_do_not_skip_the_following_prompts(monkeypatch):
+    """Regressie: het CRLF van een plakactie mocht geen vraag overslaan.
+
+    `getpass.win_getpass` stopt op de CR en laat de LF in de buffer staan.
+    Die beantwoordde dan de volgende vraag meteen met een lege invoer,
+    waardoor de Coinbase-vragen ongemerkt werden overgeslagen en de
+    installatie afbrak op het moment dat de gebruiker zijn sleutels invoerde.
+    """
+    from tools import setup_wizard
+
+    waarden = ["sk-openai-sleutel", "organizations/o/apiKeys/k", "SLEUTELINHOUD"]
+    console = _FakeWindowsConsole(waarden)
+    monkeypatch.setitem(sys.modules, "msvcrt", console)
+
+    gelezen = [setup_wizard._windows_read_secret("  Sleutel: ") for _ in waarden]
+
+    assert gelezen == waarden
+
+
+def test_windows_reader_masks_input_without_revealing_it(monkeypatch):
+    from tools import setup_wizard
+
+    console = _FakeWindowsConsole(["geheim"])
+    monkeypatch.setitem(sys.modules, "msvcrt", console)
+
+    setup_wizard._windows_read_secret("")
+    echoed = "".join(console.echoed)
+
+    assert "geheim" not in echoed
+    assert echoed.count("*") == len("geheim")
+
+
+def test_windows_reader_ignores_arrow_and_function_keys(monkeypatch):
+    """Pijltoetsen sturen twee tekens; het tweede mag niet in het secret."""
+    from tools import setup_wizard
+
+    console = _FakeWindowsConsole([])
+    console.pending = list("ab") + ["\xe0", "K"] + list("cd\r")
+    monkeypatch.setitem(sys.modules, "msvcrt", console)
+
+    assert setup_wizard._windows_read_secret("") == "abcd"
+
+
+# ---------------------------------------------------------------------------
+# Coinbase-sleutelbestand
+# ---------------------------------------------------------------------------
+
+
+def test_key_file_preserves_a_multiline_pem(tmp_path):
+    """De PEM-route bestaat juist omdat plakken meerregelige tekst afkapt."""
+    from tools.setup_wizard import load_coinbase_key_file
+
+    pem = ecdsa_pem()
+    assert pem.strip().count("\n") >= 2, "deze test heeft een meerregelige PEM nodig"
+
+    path = tmp_path / "cdp_api_key.json"
+    path.write_text(json.dumps({"name": "organizations/o/apiKeys/k", "privateKey": pem}))
+
+    name, secret = load_coinbase_key_file(path)
+
+    assert name == "organizations/o/apiKeys/k"
+    assert secret == pem.strip()
+
+
+def test_key_file_round_trips_through_env_unchanged(tmp_path):
+    from tools.setup_wizard import load_coinbase_key_file
+
+    pem = ecdsa_pem()
+    path = tmp_path / "cdp_api_key.json"
+    path.write_text(json.dumps({"name": "organizations/o/apiKeys/k", "privateKey": pem}))
+    name, secret = load_coinbase_key_file(path)
+
+    target = tmp_path / ".env"
+    target.write_text("OPENAI_API_KEY=sk-bestaand\n")
+    env_file.write_env_values(
+        {"COINBASE_API_KEY": name, "COINBASE_API_SECRET": secret}, target
+    )
+
+    values = env_file.read_env(target)
+    assert values["COINBASE_API_SECRET"].replace("\\n", "\n") == pem.strip()
+    assert values["OPENAI_API_KEY"] == "sk-bestaand"
+
+
+@pytest.mark.parametrize(
+    "content, expected",
+    [
+        ("dit is geen json", "geldig JSON"),
+        (json.dumps({"name": "x"}), "privateKey"),
+        (json.dumps({"privateKey": "x"}), "name"),
+        (json.dumps(["lijst"]), "sleutelvelden"),
+    ],
+)
+def test_unusable_key_file_explains_what_is_wrong(tmp_path, content, expected):
+    from tools.setup_wizard import load_coinbase_key_file
+
+    path = tmp_path / "cdp_api_key.json"
+    path.write_text(content)
+
+    with pytest.raises(ValueError) as exc:
+        load_coinbase_key_file(path)
+
+    assert expected in str(exc.value)
+
+
+def test_key_file_error_never_contains_the_secret(tmp_path):
+    from tools.setup_wizard import load_coinbase_key_file
+
+    path = tmp_path / "cdp_api_key.json"
+    path.write_text(json.dumps({"privateKey": "SUPERGEHEIM"}))
+
+    with pytest.raises(ValueError) as exc:
+        load_coinbase_key_file(path)
+
+    assert "SUPERGEHEIM" not in str(exc.value)
+
+
+def test_windows_copy_as_path_quotes_are_stripped():
+    """Verkenner en slepen-naar-venster zetten quotes om het pad heen."""
+    from tools.setup_wizard import _clean_path_input
+
+    assert _clean_path_input('  "C:\\Users\\Mees\\cdp_api_key.json" ') == (
+        "C:\\Users\\Mees\\cdp_api_key.json"
+    )
+
+
+def test_truncated_pem_paste_is_recognised():
+    from tools.setup_wizard import _looks_like_truncated_pem
+
+    assert _looks_like_truncated_pem("-----BEGIN EC PRIVATE KEY-----")
+    assert not _looks_like_truncated_pem(ecdsa_pem())
+    assert not _looks_like_truncated_pem("base64-ed25519-sleutel-zonder-pem")
