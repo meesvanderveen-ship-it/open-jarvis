@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from bot.config import BotConfig, configured_ticker_universe, effective_phase_c_allowed_tickers
-from bot.atomic_io import process_lock
+from bot.atomic_io import atomic_write_json, process_lock
 from bot.credential_status import READY, collect_checks, overall_state
 from bot.phase_c_live_guard import LIVE_ENTRY_GUARD_VERSION, LIVE_ENTRY_REQUIRED_GATES
 from bot.pre_live_startup_gate import assess_pre_live_startup_gate, enforce_pre_live_startup_gate
@@ -279,6 +279,24 @@ def _enforce_tiny_runtime_startup_guard(cfg: BotConfig) -> Dict[str, Any]:
     if diagnostic["fail_closed"]:
         raise SystemExit(2)
     return diagnostic
+
+
+def _write_runtime_ticker_universe_state(cfg: BotConfig) -> None:
+    """Write the current process' ticker universe to a small state file.
+
+    The dashboard backend deliberately never imports bot.config or reads
+    .env (see dashboard/backend/config.py), so this is the one safe,
+    no-secrets channel for it to learn which tickers this run of the bot
+    actually follows -- used to hide stale tickers (e.g. from a previously
+    larger ALLOWED_TICKERS list) out of positions/opportunities/thesis views.
+    """
+    payload = {
+        "generated_at": _utc_now().isoformat(),
+        "allowed_tickers": list(getattr(cfg, "allowed_tickers", []) or []),
+        "phase_c_allowed_tickers": list(getattr(cfg, "phase_c_allowed_tickers", []) or []),
+        "configured_ticker_universe": configured_ticker_universe(cfg),
+    }
+    atomic_write_json("state/runtime_ticker_universe.json", payload)
 
 
 def _log_full_workflow_runtime_diagnostic(diagnostic: Dict[str, Any]) -> None:
@@ -1170,7 +1188,14 @@ def _run_and_log_full_cycle(engine: StrategyEngine, publisher: Optional["Replica
 
     _log_cycle_summary(results)
     _replicate_full_cycle_results(publisher, results)
-    _run_lifecycle_orchestrator_service_hook(cfg, cycle_type="full")
+    # Use engine.cfg (not the separately-constructed top-level cfg): portfolio-based
+    # entry sizing mutates engine.cfg.phase_c_max_order_quote (and related caps) every
+    # cycle, while the standalone cfg never receives those updates. Passing the stale
+    # cfg here made the lifecycle governance re-check compare a portfolio-scaled order
+    # against the old static .env cap, permanently blocking poll/D2/D3 for any order
+    # sized above that static cap even though it was within the live policy that
+    # approved it.
+    _run_lifecycle_orchestrator_service_hook(engine.cfg, cycle_type="full")
 
 
 def _run_and_log_heartbeat_cycle(engine: StrategyEngine, publisher: Optional["ReplicaPublisher"], cfg: BotConfig) -> None:
@@ -1195,7 +1220,9 @@ def _run_and_log_heartbeat_cycle(engine: StrategyEngine, publisher: Optional["Re
 
     _log_heartbeat_summary(results)
     _replicate_heartbeat_results(publisher, results)
-    _run_lifecycle_orchestrator_service_hook(cfg, cycle_type="heartbeat")
+    # See matching comment in _run_and_log_full_cycle: use engine.cfg so the
+    # governance re-check sees the same portfolio-scaled caps entry sizing used.
+    _run_lifecycle_orchestrator_service_hook(engine.cfg, cycle_type="heartbeat")
 
 
 def _run_guarded_cycle(
@@ -1287,6 +1314,7 @@ def main() -> None:
         cfg.execution_mode,
         ",".join(cfg.allowed_tickers),
     )
+    _write_runtime_ticker_universe_state(cfg)
 
     if hasattr(cfg, "enable_candidate_ranking"):
         logging.info(

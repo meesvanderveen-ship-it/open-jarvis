@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 
 from bot.decision_outcome_tracker import (
     DecisionOutcomeStore,
+    _compact_outcome,
     build_decision_snapshot_records,
     build_decision_outcome_summary,
     compute_path_metrics,
@@ -151,3 +152,30 @@ def test_store_resolves_prepared_plan_as_false_positive(tmp_path):
     assert resolved[0]["outcome"]["outcome_label"] == "false_positive_plan"
     summary = build_decision_outcome_summary(resolved)
     assert summary["false_positive_plans"][0]["ticker"] == "ETH-USDC"
+
+
+def test_compact_outcome_exposes_exit_efficiency_proxy_for_growbot_river():
+    # Before this fix, _compact_outcome() only whitelisted max_favorable_pct/
+    # max_adverse_pct, silently dropping exit_efficiency_proxy -- so the
+    # trailing-giveback GrowBot/River hint rule could never see it even though
+    # compute_path_metrics() already computes it for every resolved decision.
+    record = {
+        "ticker": "ETH-USDC",
+        "created_at": "2026-07-01T00:00:00+00:00",
+        "horizon_hours": 4,
+        "decision_category": "prepared_plan",
+        "decision": "wait",
+        "trade_plan": {"plan_action": "prepare_buy"},
+        "outcome": {
+            "outcome_label": "plan_follow_through",
+            "price_change_pct": 0.01,
+            "path_metrics": {
+                "max_favorable_pct": 0.03,
+                "max_adverse_pct": -0.005,
+                "exit_efficiency_proxy": 0.15,
+            },
+        },
+    }
+    compact = _compact_outcome(record)
+    assert compact["exit_efficiency_proxy"] == 0.15
+    assert compact["max_favorable_pct"] == 0.03

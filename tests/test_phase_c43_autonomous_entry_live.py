@@ -12,6 +12,7 @@ from bot.governance_constants import C43_AUTONOMOUS_ENTRY_SUBMIT_ACK_VALUE
 from bot.order_store import OrderStore
 from bot.phase_c43_autonomous_entry_live import (
     _C43_LIFECYCLE_APPLY_AUTHORITY,
+    _derive_entry_protective_levels,
     build_phase_c43_deterministic_live_risk_snapshot,
     build_phase_c43_guard_and_submit_preparation,
     reconcile_phase_c43_fills_to_positions,
@@ -523,6 +524,103 @@ def test_c43_reconcile_filled_order_opens_position(tmp_path: Path):
     assert store.get_order("phasec-BTCUSDC-test")["status"] == "filled"
 
 
+def test_c43_reconcile_filled_order_sets_setup_type_not_just_source_setup_type(tmp_path: Path):
+    # position_manager._get_position_setup_type() reads position["setup_type"]
+    # (not source_setup_type) to pick a trailing-stop tier. Before this fix,
+    # only source_setup_type was ever written here, so every live position
+    # silently used the generic "unclear" trailing tier regardless of its
+    # real setup.
+    store = OrderStore(path=tmp_path / "orders.json", log_path=tmp_path / "events.jsonl")
+    store.upsert_order({
+        "client_order_id": "phasec-SOLUSDC-test",
+        "exchange_order_id": "cb-order-2",
+        "order_id": "cb-order-2",
+        "ticker": "SOL-USDC",
+        "side": "BUY",
+        "status": "submitted",
+        "mode": "live",
+        "source_mode": "autonomous_small_live",
+        "size_quote": "60.00",
+        "size_base": "0.75",
+        "limit_price": "80.00",
+        "trade_plan_snapshot": {"setup_type": "reclaim_reversal"},
+    })
+    state = FakeStateStore()
+    reconcile_phase_c43_fills_to_positions(
+        cfg=cfg(),
+        order_store=store,
+        state_store=state,
+        live_orders_snapshot=[{
+            "client_order_id": "phasec-SOLUSDC-test",
+            "order_id": "cb-order-2",
+            "product_id": "SOL-USDC",
+            "side": "BUY",
+            "status": "FILLED",
+            "filled_size": "0.75",
+            "average_filled_price": "80.00",
+        }],
+        apply_local=True,
+        _apply_authority=_C43_LIFECYCLE_APPLY_AUTHORITY,
+    )
+    assert state.created
+    assert state.created[0]["extra"]["setup_type"] == "reclaim_reversal"
+    assert state.created[0]["extra"]["source_setup_type"] == "reclaim_reversal"
+
+
+def test_c43_reconcile_new_fill_not_blocked_by_prior_closed_position_same_ticker(tmp_path: Path):
+    # positions.json keeps a permanent record per ticker (not per trade): once a
+    # position closes, its record stays under that ticker key with status="closed".
+    # A fresh live fill on the same ticker under a *different* order id is a
+    # legitimate re-entry, not an ambiguous double-open, and must not be blocked
+    # just because a closed record happens to still occupy that ticker key.
+    class ClosedPositionStateStore(FakeStateStore):
+        def get_position(self, ticker):
+            return {
+                "ticker": ticker,
+                "status": "closed",
+                "order_id": "old-closed-order-id",
+                "phase_c43_client_order_id": "phasec-SOLUSDC-old-closed",
+                "phase_c43_exchange_order_id": "cb-order-old-closed",
+                "close_reason": "d3_live_exit_order_filled_position_flattened",
+            }
+
+    store = OrderStore(path=tmp_path / "orders.json", log_path=tmp_path / "events.jsonl")
+    store.upsert_order({
+        "client_order_id": "phasec-SOLUSDC-new",
+        "exchange_order_id": "cb-order-new",
+        "order_id": "cb-order-new",
+        "ticker": "SOL-USDC",
+        "side": "BUY",
+        "status": "submitted",
+        "mode": "live",
+        "source_mode": "autonomous_small_live",
+        "size_quote": "113.78",
+        "size_base": "1.41131232",
+        "limit_price": "80.62",
+    })
+    state = ClosedPositionStateStore()
+    report = reconcile_phase_c43_fills_to_positions(
+        cfg=cfg(),
+        order_store=store,
+        state_store=state,
+        live_orders_snapshot=[{
+            "client_order_id": "phasec-SOLUSDC-new",
+            "order_id": "cb-order-new",
+            "product_id": "SOL-USDC",
+            "side": "BUY",
+            "status": "FILLED",
+            "filled_size": "1.41131232",
+            "average_filled_price": "80.62",
+        }],
+        apply_local=True,
+        _apply_authority=_C43_LIFECYCLE_APPLY_AUTHORITY,
+    )
+    assert report["actions"][0]["action"] == "filled_to_position"
+    assert report["actions"][0]["position_transition"] == "created_from_fill"
+    assert state.created
+    assert store.get_order("phasec-SOLUSDC-new")["status"] == "filled"
+
+
 def test_c43_reconcile_partial_fill_does_not_open_position(tmp_path: Path):
     store = OrderStore(path=tmp_path / "orders.json", log_path=tmp_path / "events.jsonl")
     store.upsert_order({
@@ -904,3 +1002,54 @@ def test_c43_live_open_order_record_requires_exchange_order_id(tmp_path: Path):
         assert str(exc) == "live open order records require exchange_order_id"
     else:
         raise AssertionError("live open order without exchange_order_id should be rejected")
+
+
+def test_derive_protective_levels_widens_stop_tighter_than_floor():
+    # Real SOL-USDC example: entry 80.42, LLM stop 79.98 (~0.55% away) --
+    # tighter than the 2% floor, so it must be widened, not accepted as-is.
+    levels = _derive_entry_protective_levels(
+        local_order={},
+        trade_plan={"stop_loss": "79.98", "invalidation": "79.98"},
+        entry_price="80.42",
+        min_stop_distance_pct=Decimal("0.02"),
+    )
+    expected_floor = Decimal("80.42") * Decimal("0.98")
+    assert Decimal(levels["stop_price"]) == expected_floor
+    assert Decimal(levels["invalidation_price"]) == expected_floor
+    assert levels["risk_state_complete"] is True
+    assert levels["risk_source"] == "widened_to_minimum_stop_distance_floor"
+
+
+def test_derive_protective_levels_leaves_already_wide_stop_untouched():
+    levels = _derive_entry_protective_levels(
+        local_order={},
+        trade_plan={"stop_loss": "76.40", "invalidation": "76.40"},  # ~5% below entry
+        entry_price="80.42",
+        min_stop_distance_pct=Decimal("0.02"),
+    )
+    assert Decimal(levels["stop_price"]) == Decimal("76.40")
+    assert levels["risk_source"] == "explicit_entry_risk"
+
+
+def test_derive_protective_levels_floor_applies_on_top_of_missing_stop_fallback():
+    # No usable candidate at all -> existing 2.5% conservative fallback fires
+    # first; since 2.5% > 2% floor, the floor must not further widen it.
+    levels = _derive_entry_protective_levels(
+        local_order={},
+        trade_plan={},
+        entry_price="100.00",
+        min_stop_distance_pct=Decimal("0.02"),
+    )
+    assert Decimal(levels["stop_price"]) == Decimal("97.500")
+    assert levels["risk_source"] == "conservative_entry_fill_fallback"
+
+
+def test_derive_protective_levels_zero_floor_is_a_no_op():
+    levels = _derive_entry_protective_levels(
+        local_order={},
+        trade_plan={"stop_loss": "79.98", "invalidation": "79.98"},
+        entry_price="80.42",
+        min_stop_distance_pct=Decimal("0"),
+    )
+    assert Decimal(levels["stop_price"]) == Decimal("79.98")
+    assert levels["risk_source"] == "explicit_entry_risk"

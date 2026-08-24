@@ -62,9 +62,19 @@ def test_fast_start_autotune_allowlist_is_narrower_than_full_governor_allowlist(
     assert by_name["MAX_SPREAD_PCT"]["fast_start_autotune_allowed"] is True
     assert by_name["MAX_SPREAD_PCT"]["fast_start_max_step_pct"] == 1.0
 
-    # Governor-supported but not on the narrower fast_start allowlist.
-    assert by_name["EXIT_TARGET_MAX_DISTANCE_FROM_MID_PCT"]["fast_start_autotune_allowed"] is False
-    assert by_name["EXIT_TARGET_MAX_DISTANCE_FROM_MID_PCT"]["fast_start_max_step_pct"] is None
+    # Governor-supported, already human_review_required (not high-risk), and on
+    # the approved-profile whitelist -- extended onto fast_start alongside the
+    # other 4 risk/exit-ratio parameters (2026-07 gap fix; it was previously
+    # omitted with no safety rationale, just an unfinished allowlist entry).
+    assert by_name["EXIT_TARGET_MAX_DISTANCE_FROM_MID_PCT"]["fast_start_autotune_allowed"] is True
+    assert by_name["EXIT_TARGET_MAX_DISTANCE_FROM_MID_PCT"]["fast_start_max_step_pct"] == 2.0
+
+    # STOP_DISTANCE_PCT: made runtime_configured (bot/phase_c43_autonomous_entry_live.py
+    # now enforces it as a real minimum-stop-distance floor) and wired onto
+    # fast_start alongside the other risk/exit-ratio parameters (2026-07).
+    assert by_name["STOP_DISTANCE_PCT"]["fast_start_autotune_allowed"] is True
+    assert by_name["STOP_DISTANCE_PCT"]["fast_start_max_step_pct"] == 2.0
+    assert by_name["STOP_DISTANCE_PCT"]["implementation_status"] == "runtime_configured"
 
     # High-risk / not governor-supported parameters are never fast_start-eligible.
     assert by_name["JUDGE_MIN_GATE_CONFIDENCE"]["fast_start_autotune_allowed"] is False
@@ -128,6 +138,45 @@ def test_learning_context_is_allowlisted_and_adapter_uses_its_regime() -> None:
     assert episode["label"] == "bad_trade"
     assert episode["state"]["confidence"] == 71.0
     assert episode["regime"] == "range"
+
+
+def test_learning_context_extracts_regime_label_from_raw_llm_regime_dict() -> None:
+    # Real production shape (bot/strategy_engine.py's "regime" analysis step
+    # returns a dict, not a string): decision_outcome_tracker.py's **analysis
+    # spread means this dict lands as decision["regime"]. Before the fix,
+    # _first_text stringified the whole dict into a garbled, useless tag
+    # like "{'regime_label':_'mixed',_'regime_confidence':_0.86,_...}" instead
+    # of resolving to the clean "mixed" label.
+    context = build_learning_context_snapshot(
+        {},
+        {
+            "confidence": 64,
+            "regime": {
+                "regime_label": "mixed",
+                "regime_confidence": 0.86,
+                "regime_strength": 0.57,
+                "primary_driver": "higher-timeframe bearish backdrop persists",
+            },
+        },
+    )
+    assert context["regime"] == "mixed"
+
+
+def test_learning_context_extracts_adx_1h_from_nested_feature_pack_indicators() -> None:
+    # Added 2026-07-08 after a live SOL-USDC loss review: the bear case at
+    # entry explicitly flagged weak 1h trend conviction (ADX ~10.9, a choppy
+    # market) as a reason to avoid the trade, but nothing fed that factor into
+    # the learning state that accumulates evidence across trades -- only
+    # trend_strength (a price-change ratio, not trend conviction) was tracked.
+    # adx_1h closes that gap. The real feature pack shape nests it at
+    # indicators.1h.adx_14 (confirmed against logs/analysis.jsonl), not flat.
+    context = build_learning_context_snapshot(
+        {"indicators": {"1h": {"adx_14": 10.89802026831419}, "4h": {"adx_14": 29.73}}},
+        {"confidence": 71},
+    )
+    assert context["state"]["adx_1h"] == pytest.approx(10.8980202683)
+    # 4h ADX must not leak in under the same key.
+    assert context["state"]["adx_1h"] != pytest.approx(29.73)
 
 
 def test_learning_context_sanitizer_drops_unallowlisted_fields_before_ledger_use() -> None:
@@ -633,6 +682,54 @@ def test_bad_outcome_state_hints_cover_volatility_and_drawdown() -> None:
     parameters = {hint["parameter"] for hint in hints}
     assert {"VOLATILITY_MAX_PCT", "STOP_DISTANCE_PCT", "JUDGE_MIN_GATE_CONFIDENCE", "ORDERBOOK_LIQUIDITY_MIN_SCORE"} <= parameters
     assert all(hint["direction"] == "tighten" for hint in hints)
+
+
+def test_false_positive_plan_with_favorable_move_hints_loosen_stop_distance() -> None:
+    # classify_decision_outcome() (bot/decision_outcome_tracker.py) labels any
+    # stop-touched approved_entry/prepared_plan episode "false_positive_plan"
+    # regardless of what price did afterward. That label is not in _BAD_LABELS,
+    # so this must be its own rule, independent of _BAD_OUTCOME_STATE_HINTS.
+    hints = _parameter_hints("false_positive_plan", {}, {"mfe_pct": 0.015})
+    assert hints == [{
+        "parameter": "STOP_DISTANCE_PCT",
+        "direction": "loosen",
+        "reason": "stop_touched_but_favorable_move_still_occurred_in_window",
+    }]
+
+
+def test_false_positive_plan_without_favorable_move_yields_no_hint() -> None:
+    assert _parameter_hints("false_positive_plan", {}, {"mfe_pct": 0.002}) == []
+    assert _parameter_hints("false_positive_plan", {}, {}) == []
+
+
+def test_false_positive_plan_never_fires_the_shared_bad_outcome_rules() -> None:
+    # false_positive_plan must not also trigger the tighten-side hints gated on
+    # _BAD_LABELS (that would misuse a huge, unrelated evidence pool for
+    # MAX_SPREAD_PCT/PHASE_D2_MIN_EXPECTED_NET_EDGE_PCT/etc).
+    hints = _parameter_hints("false_positive_plan", {}, {"mfe_pct": 0.02, "spread_pct": 0.008, "confidence": 0.7})
+    assert {hint["parameter"] for hint in hints} == {"STOP_DISTANCE_PCT"}
+
+
+def test_plan_follow_through_with_large_giveback_hints_tighten_trailing_distance() -> None:
+    # A favorable move (mfe_pct) that mostly reverted by window end (low
+    # exit_efficiency_proxy) is evidence a live trailing stop would have
+    # locked in more of the gain -- the trailing distance is wider than needed.
+    hints = _parameter_hints("plan_follow_through", {}, {"mfe_pct": 0.03, "exit_efficiency_proxy": 0.15})
+    assert hints == [{
+        "parameter": "PHASE_D2_DEFAULT_TRAILING_DISTANCE_PCT",
+        "direction": "tighten",
+        "reason": "favorable_move_mostly_given_back_before_window_end",
+    }]
+
+
+def test_plan_follow_through_with_good_exit_efficiency_yields_no_trailing_hint() -> None:
+    hints = _parameter_hints("plan_follow_through", {}, {"mfe_pct": 0.03, "exit_efficiency_proxy": 0.8})
+    assert hints == []
+
+
+def test_plan_follow_through_with_small_mfe_yields_no_trailing_hint_even_if_efficiency_low() -> None:
+    hints = _parameter_hints("plan_follow_through", {}, {"mfe_pct": 0.002, "exit_efficiency_proxy": 0.1})
+    assert hints == []
 
 
 def test_river_signals_expose_good_bad_missed_probabilities_and_regime_effect_direction(tmp_path: Path) -> None:

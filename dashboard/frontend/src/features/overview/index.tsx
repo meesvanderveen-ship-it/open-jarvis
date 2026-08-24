@@ -16,7 +16,7 @@ import { StatusBadge, type StatusTone } from '@/components/status-badge'
 import { ThemeSwitch } from '@/components/theme-switch'
 import { useRiskGuards } from '@/features/risk/api'
 import { SystemStatusPanel } from '@/features/system/system-status-panel'
-import { useLiveStatus, usePipelineHealth, useRunSummary } from './api'
+import { useLiveStatus, usePipelineHealth, useRunSummary, useTrackedTickers } from './api'
 
 const DECISION_TONE: Record<string, StatusTone> = {
   approve_trade: 'safe',
@@ -59,6 +59,7 @@ export function Overview() {
   const pipeline = usePipelineHealth()
   const riskGuards = useRiskGuards()
   const runSummary = useRunSummary()
+  const trackedTickers = useTrackedTickers()
   const [showFullSummary, setShowFullSummary] = useState(false)
 
   const isLoading = live.isLoading || pipeline.isLoading || riskGuards.isLoading
@@ -101,6 +102,18 @@ export function Overview() {
             <p className='text-muted-foreground'>
               At-a-glance: is the bot running safely right now?
             </p>
+            <div className='mt-2 flex flex-wrap items-center gap-1.5'>
+              <span className='text-xs text-muted-foreground'>Tracked tickers:</span>
+              {trackedTickers.data?.allowed_tickers.length ? (
+                trackedTickers.data.allowed_tickers.map((ticker) => (
+                  <Badge key={ticker} variant='outline' className='font-mono text-xs'>
+                    {ticker}
+                  </Badge>
+                ))
+              ) : (
+                <span className='text-xs text-muted-foreground'>unknown</span>
+              )}
+            </div>
           </div>
           <div className='flex items-center gap-2'>
             <StatusBadge tone={overallTone} className='px-3 py-1 text-sm font-medium'>
@@ -233,13 +246,13 @@ export function Overview() {
               </CardHeader>
               <CardContent className='space-y-2 text-sm'>
                 <Row label='open orders'>
-                  <span className='font-semibold'>{pipeline.data?.open_orders ?? '—'}</span>
+                  <span className='font-mono text-base font-semibold tabular-nums'>{pipeline.data?.open_orders ?? '—'}</span>
                 </Row>
                 <Row label='open positions'>
-                  <span className='font-semibold'>{pipeline.data?.open_positions ?? '—'}</span>
+                  <span className='font-mono text-base font-semibold tabular-nums'>{pipeline.data?.open_positions ?? '—'}</span>
                 </Row>
                 <Row label='open D3 exits'>
-                  <span className='font-semibold'>
+                  <span className='font-mono text-base font-semibold tabular-nums'>
                     {live.data?.open_d3_exit_summary?.count ?? '—'}
                   </span>
                 </Row>

@@ -59,6 +59,7 @@ if not _real_module_available("numpy"):
     numpy_stub.polyfit = lambda *args, **kwargs: [0]
     sys.modules["numpy"] = numpy_stub
 
+from bot.config import MODE_B_CONTROLLED_STOP_EXIT_ACK_VALUE
 from bot.order_store import OrderStore
 from bot.phase_d3_controlled_live_exits import D3_ACK
 from bot.state_store import StateStore
@@ -86,9 +87,13 @@ class ExecutorShouldNotBeCalled:
 
 
 class FakeCoinbaseClient:
-    def __init__(self) -> None:
+    def __init__(self, *, ioc_fill_status: str = "FILLED", ioc_filled_size: str = "0.0003083267431275") -> None:
         self.limit_calls: list[dict] = []
         self.market_calls: list[dict] = []
+        self.cancel_calls: list[str] = []
+        self.ioc_calls: list[dict] = []
+        self.ioc_fill_status = ioc_fill_status
+        self.ioc_filled_size = ioc_filled_size
 
     def place_limit_order(self, **kwargs):
         self.limit_calls.append(kwargs)
@@ -97,6 +102,17 @@ class FakeCoinbaseClient:
     def place_market_order(self, **kwargs):  # pragma: no cover - must never run
         self.market_calls.append(kwargs)
         raise AssertionError("market order must not be used")
+
+    def cancel_order(self, order_id: str):
+        self.cancel_calls.append(order_id)
+        return {"success_results": [order_id]}
+
+    def place_limit_order_ioc(self, **kwargs):
+        self.ioc_calls.append(kwargs)
+        return {"order_id": "cb-stopexit-ioc-1", "success": True}
+
+    def get_order(self, order_id: str):
+        return {"order": {"status": self.ioc_fill_status, "filled_size": self.ioc_filled_size, "average_filled_price": "71000"}}
 
 
 def _cfg(**overrides):
@@ -200,6 +216,15 @@ def _stop_close_action():
     }
 
 
+def _partial_reduce_action():
+    return {
+        "action": "reduce",
+        "side": "SELL",
+        "size_base": "0.0001541633715638",
+        "reason": "judge_reduce_size",
+    }
+
+
 def test_full_workflow_discretionary_close_routes_to_d3_full_close_submit(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     (tmp_path / "logs").mkdir()
@@ -223,6 +248,225 @@ def test_full_workflow_discretionary_close_routes_to_d3_full_close_submit(tmp_pa
     assert engine.order_store.open_exit_orders("BTC-USDC")
 
 
+def test_full_workflow_reduce_size_routes_to_d3_partial_reduce_submit(tmp_path: Path, monkeypatch) -> None:
+    # Regression test for a live incident: a judge reduce_size for a
+    # weakening thesis returned d3_no_ready_position_executor_plan because
+    # it was routed through the D.2 take-profit-bracket fee-edge gate, which
+    # answers an unrelated question ("is a fresh TP from here still
+    # profitable after fees") and has nothing to do with a risk-driven
+    # partial exit the judge already decided on. reduce_size must use the
+    # same direct discretionary-exit intent path as close, sized to the
+    # requested partial amount, not the D.2 report.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "logs").mkdir()
+    client = FakeCoinbaseClient()
+    engine = _engine(tmp_path, cfg=_cfg(min_live_order_quote_usdc=Decimal("5.00")), client=client)
+
+    result = engine._handle_position_action(
+        ticker="BTC-USDC",
+        position=_position(),
+        action=_partial_reduce_action(),
+        feature_pack=_feature_pack(),
+    )
+
+    assert result["status"] == "d3_controlled_live_exit_submitted"
+    assert result["executed"] is True
+    intent = result["d3_controlled_exit_report"]["selected_exit_intent"]
+    assert intent["label"] == "PARTIAL_REDUCE"
+    assert intent["size_base"] == "0.00015416"
+    assert client.limit_calls and client.limit_calls[0]["side"] == "SELL"
+    assert client.market_calls == []
+
+
+def test_reduce_size_below_min_quote_is_blocked_not_full_close_exempt(tmp_path: Path, monkeypatch) -> None:
+    # A partial reduce must not silently inherit the full-close exemption
+    # that lets a full close dump a below-minimum residual: with nothing
+    # forcing an immediate exit, an under-minimum partial should be blocked
+    # so the bot can wait instead of forcing a too-small live order.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "logs").mkdir()
+    client = FakeCoinbaseClient()
+    engine = _engine(tmp_path, client=client)  # default cfg: $50 min live order quote
+
+    result = engine._handle_position_action(
+        ticker="BTC-USDC",
+        position=_position(),
+        action=_partial_reduce_action(),
+        feature_pack=_feature_pack(),
+    )
+
+    assert result["status"] == "d3_controlled_exit_blocked_by_readiness"
+    intent = result["d3_controlled_exit_report"]["selected_exit_intent"]
+    assert "exit_quote_below_min_live_order_quote" in intent["blockers"]
+    assert client.limit_calls == []
+
+
+def test_position_action_uses_freshest_persisted_stop_not_stale_in_memory_snapshot(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # Regression test for a live incident: a judge reduce/close decision
+    # carries the position snapshot fetched at the top of the cycle, minutes
+    # before this point (analyze_ticker's judge call is slow). A concurrent
+    # hourly heartbeat can trail the stop below entry and persist it to disk
+    # in that window, but the in-memory snapshot never sees it -- so the exit
+    # route was failing protective-risk-completeness on a stale
+    # stop_price == entry_price artifact even though the live position was
+    # actually risk-complete (stop already trailed below entry on disk).
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "state").mkdir()
+    client = FakeCoinbaseClient()
+    engine = _engine(tmp_path, client=client)
+    stale_position = _position(stop_price="76000")  # == entry_price, as if never trailed
+    engine.state.upsert_position("BTC-USDC", _position(stop_price="70000"))  # trailed below entry on disk
+
+    result = engine._handle_position_action(
+        ticker="BTC-USDC",
+        position=stale_position,
+        action=_full_close_action(),
+        feature_pack=_feature_pack(),
+    )
+
+    assert result["status"] == "d3_controlled_live_exit_submitted"
+    assert result["executed"] is True
+    assert client.limit_calls and client.limit_calls[0]["side"] == "SELL"
+
+
+def test_blocked_partial_reduce_falls_back_to_resting_tp1_order(tmp_path: Path, monkeypatch) -> None:
+    # Regression test for a live incident: a judge reduce_size for SOL-USDC
+    # kept returning d3_controlled_exit_blocked_by_readiness because the
+    # sliced amount fell under min_live_order_quote_usdc on a small position,
+    # and -- since the cycle's action was "reduce", not "hold" -- the
+    # proactive TP1 resting logic never ran either. Net effect: nothing ever
+    # rested on the book despite a live take-profit target above price. A
+    # blocked partial reduce must fall back to resting the position's own
+    # take-profit order.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "logs").mkdir()
+    client = FakeCoinbaseClient()
+    engine = _engine(tmp_path, client=client)  # default cfg: $50 min live order quote
+    position = _position(take_profit_price="75000")
+
+    result = engine._handle_position_action(
+        ticker="BTC-USDC",
+        position=position,
+        action=_partial_reduce_action(),
+        feature_pack=_feature_pack(),
+    )
+
+    assert result["status"] == "d3_controlled_exit_blocked_by_readiness"
+    intent = result["d3_controlled_exit_report"]["selected_exit_intent"]
+    assert "exit_quote_below_min_live_order_quote" in intent["blockers"]
+    proactive = result["proactive_take_profit_exit_fallback"]
+    assert proactive["submitted"] is True
+    assert proactive["exit_intent"]["label"] == "TP1"
+    assert client.limit_calls and client.limit_calls[0]["side"] == "SELL"
+    assert engine.order_store.open_exit_orders("BTC-USDC")
+
+
+def test_blocked_partial_reduce_escalates_to_full_close_when_price_past_take_profit(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # If price has already run through take_profit_price, resting a maker
+    # TP1 order there would cross the book, so the TP1 fallback itself gets
+    # blocked (take_profit_price_at_or_below_current_bid...). Combined with
+    # a too-small partial reduce, neither a partial sell nor a fresh TP
+    # order can legally go out -- a full close is the only reduce-only
+    # action left, so the blocked reduce must escalate to one.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "logs").mkdir()
+    client = FakeCoinbaseClient()
+    engine = _engine(tmp_path, client=client)  # default cfg: $50 min live order quote
+    position = _position(take_profit_price="71000")  # below current best_bid 71554.19
+
+    result = engine._handle_position_action(
+        ticker="BTC-USDC",
+        position=position,
+        action=_partial_reduce_action(),
+        feature_pack=_feature_pack(),
+    )
+
+    assert result["escalated_from_blocked_partial_reduce"] is True
+    assert result["status"] == "d3_controlled_live_exit_submitted"
+    assert result["executed"] is True
+    intent = result["d3_controlled_exit_report"]["selected_exit_intent"]
+    assert intent["label"] == "FULL_CLOSE"
+    assert client.limit_calls and client.limit_calls[0]["side"] == "SELL"
+
+
+def _hold_action(position):
+    return {
+        "action": "hold",
+        "side": "NONE",
+        "size_base": "0",
+        "reason": "position_valid",
+        "metadata": {"updated_position": position},
+    }
+
+
+def test_hold_cycle_proactively_places_tp1_resting_sell_order(tmp_path: Path, monkeypatch) -> None:
+    # Without this, the position only reacts to a level crossing on the next
+    # cycle/heartbeat -- a fast move through take-profit between cycles would
+    # be missed entirely since nothing was ever resting on the book. A hold
+    # cycle (no close/reduce already happening) should rest a maker SELL at
+    # the position's own take_profit_price.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "logs").mkdir()
+    client = FakeCoinbaseClient()
+    engine = _engine(tmp_path, client=client)
+    position = _position(take_profit_price="75000")
+
+    result = engine._handle_position_action(
+        ticker="BTC-USDC",
+        position=position,
+        action=_hold_action(position),
+        feature_pack=_feature_pack(),
+    )
+
+    assert result["status"] == "hold_position"
+    proactive = result["proactive_take_profit_exit"]
+    assert proactive["submitted"] is True
+    assert proactive["exit_intent"]["label"] == "TP1"
+    assert Decimal(proactive["exit_intent"]["limit_price"]) == Decimal("75000")
+    assert client.limit_calls and client.limit_calls[0]["side"] == "SELL"
+    assert client.market_calls == []
+    assert engine.order_store.open_exit_orders("BTC-USDC")
+
+
+def test_hold_cycle_does_not_duplicate_existing_resting_exit_order(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "logs").mkdir()
+    client = FakeCoinbaseClient()
+    engine = _engine(tmp_path, client=client)
+    position = _position(take_profit_price="75000")
+
+    engine.order_store.upsert_order({
+        "client_order_id": "phased3-BTCUSDC-TP1-pos-1-existing",
+        "exchange_order_id": "exchange-phased3-BTCUSDC-TP1-pos-1-existing",
+        "ticker": "BTC-USDC",
+        "side": "SELL",
+        "status": "submitted",
+        "phase": "D3_controlled_live_reduce_only_exits",
+        "linked_position_id": "pos-1",
+        "size_base": "0.0003083267431275",
+        "remaining_size": "0.0003083267431275",
+        "limit_price": "75000.00",
+        "execution_action": "place_limit_sell",
+        "d3_exit_label": "TP1",
+    })
+
+    result = engine._handle_position_action(
+        ticker="BTC-USDC",
+        position=position,
+        action=_hold_action(position),
+        feature_pack=_feature_pack(),
+    )
+
+    assert result["status"] == "hold_position"
+    assert "proactive_take_profit_exit" not in result
+    assert client.limit_calls == []
+
+
 def test_stop_close_routes_to_controlled_stop_preview_without_d3_submit(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     (tmp_path / "logs").mkdir()
@@ -243,6 +487,61 @@ def test_stop_close_routes_to_controlled_stop_preview_without_d3_submit(tmp_path
     assert client.limit_calls == []
     assert client.market_calls == []
     assert engine.order_store.open_exit_orders("BTC-USDC") == []
+
+
+def test_stop_close_executes_via_mode_b_when_fully_armed(tmp_path: Path, monkeypatch) -> None:
+    # Mode A (default everywhere else) stays preview-only, per the test
+    # above. Mode B is this codebase's own documented graduated activation
+    # (docs/MODE_B_CONTROLLED_STOP_EXIT_ACTIVATION_PLAN.md): only when every
+    # flag plus the exact ACK are armed does a stop breach actually cancel
+    # (none open here), submit a near-market IOC SELL, verify the fill, and
+    # close the local position.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "logs").mkdir()
+    client = FakeCoinbaseClient()
+    engine = _engine(
+        tmp_path,
+        client=client,
+        cfg=_cfg(
+            enable_controlled_stop_market_exits=True,
+            enable_autonomous_stop_exit_cancel=True,
+            enable_autonomous_stop_exit_submit=True,
+            enable_autonomous_stop_exit_apply=True,
+            mode_b_controlled_stop_exit_ack=MODE_B_CONTROLLED_STOP_EXIT_ACK_VALUE,
+            controlled_stop_exit_max_quote_usd=Decimal("25.00"),
+            controlled_stop_exit_require_open_tp_cancel_first=True,
+            controlled_stop_exit_order_type="near_market_limit_ioc",
+            controlled_stop_exit_max_slippage_pct=Decimal("0.0100"),
+            market_order_enabled=False,
+            enable_market_orders=False,
+            allow_market_orders=False,
+            mode_c_market_order_ack="",
+            enable_trade_reflection_memory=False,
+        ),
+    )
+    # stop_price above the feature_pack's current price (71554.20) so
+    # controlled_stop_market_exit_plan._stop_breached's numeric fallback
+    # (current <= stop) fires -- distinct from _requires_controlled_stop_exit_route's
+    # own reason-text check, which already routes "stop_loss_hit" here regardless.
+    position = _position(stop_price="72000")
+    engine.state.upsert_position("BTC-USDC", position)
+
+    result = engine._handle_position_action(
+        ticker="BTC-USDC",
+        position=position,
+        action=_stop_close_action(),
+        feature_pack=_feature_pack(),
+    )
+
+    assert result["status"] == "controlled_stop_market_exit_applied"
+    assert result["executed"] is True
+    assert client.cancel_calls == []  # nothing open to cancel in this fixture
+    assert len(client.ioc_calls) == 1
+    assert client.ioc_calls[0]["side"] == "SELL"
+    assert client.limit_calls == []
+    assert client.market_calls == []
+    closed = engine.state.get_position("BTC-USDC")
+    assert closed["status"] == "closed"
 
 
 def test_full_close_blocks_stale_ask_that_diverges_from_market_evidence(tmp_path: Path, monkeypatch) -> None:

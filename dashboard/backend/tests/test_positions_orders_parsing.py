@@ -2,6 +2,7 @@ import json
 
 from dashboard.backend.services import orders as orders_service
 from dashboard.backend.services import positions as positions_service
+from dashboard.backend.services import ticker_universe
 
 
 def test_get_positions_marks_open_vs_closed(monkeypatch, tmp_path):
@@ -57,6 +58,43 @@ def test_closed_risk_incomplete_does_not_count_as_open_warning(monkeypatch, tmp_
     assert summary["open_risk_incomplete_tickers"] == ["BTC-USDC"]
     assert summary["closed_risk_incomplete_count"] == 1
     assert summary["closed_risk_incomplete_tickers"] == ["AVAX-USDC"]
+
+
+def test_get_positions_hides_closed_positions_outside_ticker_universe(monkeypatch, tmp_path):
+    fixture = {
+        "BTC-USDC": {"close_time": None, "entry_price": "100"},
+        "XRP-USDC": {"close_time": "2026-06-01T00:00:00Z", "entry_price": "0.5"},
+    }
+    path = tmp_path / "positions.json"
+    path.write_text(json.dumps(fixture))
+    monkeypatch.setattr(positions_service, "resolve_state_file", lambda name: path)
+    universe_path = tmp_path / "runtime_ticker_universe.json"
+    universe_path.write_text(json.dumps({"configured_ticker_universe": ["BTC-USDC"]}))
+    monkeypatch.setattr(ticker_universe, "resolve_state_file", lambda name: universe_path)
+
+    result = positions_service.get_positions()
+
+    tickers = {p["ticker"] for p in result["positions"]}
+    assert tickers == {"BTC-USDC"}
+
+
+def test_get_positions_never_hides_an_open_position_outside_ticker_universe(monkeypatch, tmp_path):
+    # A currently open position must stay visible even if ALLOWED_TICKERS
+    # shrank after it was entered -- it still needs to be monitored/exited.
+    fixture = {
+        "XRP-USDC": {"close_time": None, "entry_price": "0.5"},
+    }
+    path = tmp_path / "positions.json"
+    path.write_text(json.dumps(fixture))
+    monkeypatch.setattr(positions_service, "resolve_state_file", lambda name: path)
+    universe_path = tmp_path / "runtime_ticker_universe.json"
+    universe_path.write_text(json.dumps({"configured_ticker_universe": ["BTC-USDC"]}))
+    monkeypatch.setattr(ticker_universe, "resolve_state_file", lambda name: universe_path)
+
+    result = positions_service.get_positions()
+
+    tickers = {p["ticker"] for p in result["positions"]}
+    assert tickers == {"XRP-USDC"}
 
 
 def test_get_positions_handles_missing_file(monkeypatch, tmp_path):

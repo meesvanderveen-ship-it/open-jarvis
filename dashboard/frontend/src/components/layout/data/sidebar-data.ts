@@ -1,55 +1,100 @@
 import {
-  Activity,
-  AlertTriangle,
-  BarChart3,
-  Brain,
-  CheckSquare,
-  FileText,
-  GraduationCap,
   LayoutDashboard,
-  ScrollText,
-  Settings,
+  Sprout,
   SlidersHorizontal,
-  Target,
+  Radar,
+  Workflow,
   Wallet,
+  ShieldAlert,
+  ScrollText,
+  FolderOpen,
+  FlaskConical,
+  ClipboardCheck,
+  Palette,
+  BookText,
 } from 'lucide-react'
 import { type SidebarData } from '../types'
 
-// Navigatie voor de read-only control center. Elke url hieronder moet
-// overeenkomen met een route in src/routes/_authenticated/.
 export const sidebarData: SidebarData = {
   navGroups: [
     {
-      title: 'Overzicht',
+      title: 'Cockpit',
       items: [
-        { title: 'Dashboard', url: '/', icon: LayoutDashboard },
-        { title: 'Posities', url: '/positions', icon: Wallet },
-        { title: 'Kansen', url: '/opportunities', icon: Target },
+        {
+          title: 'Overview',
+          url: '/overview',
+          icon: LayoutDashboard,
+        },
+        {
+          title: 'Positions & Orders',
+          url: '/positions',
+          icon: Wallet,
+        },
+        {
+          title: 'Opportunity Radar',
+          url: '/opportunities',
+          icon: Radar,
+        },
+        {
+          title: 'Risk & Safety',
+          url: '/risk',
+          icon: ShieldAlert,
+        },
       ],
     },
     {
-      title: 'Analyse',
+      title: 'Analysis & Governance',
       items: [
-        { title: 'Agent trace', url: '/agent-trace', icon: Brain },
-        { title: 'Learning', url: '/learning', icon: GraduationCap },
-        { title: 'Simulatie', url: '/simulation', icon: BarChart3 },
-        { title: 'Parameters', url: '/parameters', icon: SlidersHorizontal },
+        {
+          title: 'Learning (GrowBot/River)',
+          url: '/learning',
+          icon: Sprout,
+        },
+        {
+          title: 'Parameter Proposals',
+          url: '/parameters',
+          icon: SlidersHorizontal,
+        },
+        {
+          title: 'Trade Thesis',
+          url: '/thesis',
+          icon: BookText,
+        },
+        {
+          title: 'Agent Trace',
+          url: '/agent-trace',
+          icon: Workflow,
+        },
+        {
+          title: 'Manual Approval',
+          url: '/approvals',
+          icon: ClipboardCheck,
+        },
+        {
+          title: 'Simulation Lab',
+          url: '/simulation',
+          icon: FlaskConical,
+        },
+        {
+          title: 'Logs & Evidence',
+          url: '/logs',
+          icon: ScrollText,
+        },
+        {
+          title: 'Reports & Audits',
+          url: '/reports',
+          icon: FolderOpen,
+        },
       ],
     },
     {
-      title: 'Toezicht',
+      title: 'Other',
       items: [
-        { title: 'Risico', url: '/risk', icon: AlertTriangle },
-        { title: 'Goedkeuringen', url: '/approvals', icon: CheckSquare },
-        { title: 'Rapporten', url: '/reports', icon: FileText },
-        { title: 'Logs', url: '/logs', icon: ScrollText },
-      ],
-    },
-    {
-      title: 'Systeem',
-      items: [
-        { title: 'Status', url: '/', icon: Activity },
-        { title: 'Instellingen', url: '/settings', icon: Settings },
+        {
+          title: 'Appearance',
+          url: '/settings',
+          icon: Palette,
+        },
       ],
     },
   ],

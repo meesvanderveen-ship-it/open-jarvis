@@ -115,6 +115,35 @@ def test_stop_breach_and_open_tp_above_market_plan_ready(tmp_path: Path, monkeyp
     assert report["state_write_performed"] is False
 
 
+def test_stop_breach_with_no_open_exit_order_is_plan_ready(tmp_path: Path, monkeypatch) -> None:
+    # No TP/exit order was ever resting for this position (e.g. it was cancelled by
+    # an earlier cycle, or none was ever placed): there is nothing to cancel first,
+    # so the stop-sell must be able to proceed directly against the full available
+    # base with zero real blockers. Confirmed live 2026-07-08 on SOL-USDC: status
+    # stayed "blocked_review_required" with an empty blockers list for 6+ hours
+    # straight in exactly this situation, because the status/next_step gates only
+    # checked open_tp_above_market / the raw cancel_verified default, both of which
+    # are permanently false/False once the only exit order is already gone.
+    state = _state(tmp_path, monkeypatch)
+    orders = _orders(tmp_path)
+    _seed_position(state)
+
+    report = build_controlled_stop_market_exit_plan(
+        ticker="BTC-USDC",
+        linked_position_id="76310097-849e-481c-b587-ba44bc3330fe",
+        market_context={"current_price": "71000", "reasons": ["stop_breached_or_below_invalidation"]},
+        order_store=orders,
+        state_store=state,
+    )
+
+    assert report["blockers"] == []
+    assert report["open_d3_exit_count"] == 0
+    assert report["status"] == "controlled_stop_exit_plan_ready"
+    assert report["controlled_stop_exit_next_step"] == "prepare_stop_sell_preview"
+    assert report["controlled_market_sell_preview"]["ready_after_cancel_verified"] is True
+    assert report["controlled_market_sell_preview"]["sell_base"] == "0.00015416"
+
+
 def test_duplicate_open_exit_blocks_second_sell(tmp_path: Path, monkeypatch) -> None:
     state = _state(tmp_path, monkeypatch)
     orders = _orders(tmp_path)

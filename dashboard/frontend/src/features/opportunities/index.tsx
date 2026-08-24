@@ -17,6 +17,7 @@ import { Search } from '@/components/search'
 import { StatusBadge, type StatusTone } from '@/components/status-badge'
 import { ThemeSwitch } from '@/components/theme-switch'
 import { useOpportunities } from './api'
+import { ProximityConditions, ProximityGauge } from './proximity-gauge'
 
 function scoreTone(score: number | null | undefined): StatusTone {
   if (score == null) return 'info'
@@ -42,9 +43,14 @@ export function Opportunities() {
     [data]
   )
 
-  const filtered = (data?.opportunities ?? []).filter(
-    (o) => decisionFilter === 'all' || o.decision === decisionFilter
-  )
+  const filtered = (data?.opportunities ?? [])
+    .filter((o) => decisionFilter === 'all' || o.decision === decisionFilter)
+    // Grid fills left-to-right, row by row, so sorting proximity.score
+    // descending here puts the biggest trade candidate top-left and each
+    // next-closest ticker directly after it, wrapping to new rows in order.
+    // Missing proximity sorts last rather than first (treated as -1, below
+    // the 0-100 range) so unscored tickers don't crowd out real candidates.
+    .sort((a, b) => (b.proximity?.score ?? -1) - (a.proximity?.score ?? -1))
 
   return (
     <>
@@ -96,9 +102,9 @@ export function Opportunities() {
             {filtered.map((o) => (
               <Card key={o.ticker}>
                 <CardHeader className='flex flex-row items-center justify-between space-y-0 pb-2'>
-                  <CardTitle className='text-sm font-medium'>{o.ticker}</CardTitle>
+                  <CardTitle className='font-mono text-sm font-semibold tracking-tight'>{o.ticker}</CardTitle>
                   <StatusBadge tone={scoreTone(o.opportunity_score)}>
-                    score {o.opportunity_score ?? '—'}
+                    score <span className='font-mono tabular-nums'>{o.opportunity_score ?? '—'}</span>
                   </StatusBadge>
                 </CardHeader>
                 <CardContent className='space-y-2 text-sm'>
@@ -114,13 +120,17 @@ export function Opportunities() {
                   </div>
                   <div className='flex items-center justify-between'>
                     <span className='text-muted-foreground'>judge confidence</span>
-                    <span>{o.judge?.confidence ?? '—'}</span>
+                    <span className='font-mono tabular-nums'>{o.judge?.confidence ?? '—'}</span>
                   </div>
                   <div className='flex items-center justify-between'>
                     <span className='text-muted-foreground'>price</span>
-                    <span>{o.current_price ?? '—'}</span>
+                    <span className='font-mono tabular-nums'>{o.current_price ?? '—'}</span>
                   </div>
                   <p className='line-clamp-3 text-xs text-muted-foreground'>{o.reason}</p>
+                  <div className='border-t pt-3'>
+                    <ProximityGauge proximity={o.proximity} />
+                    <ProximityConditions proximity={o.proximity} />
+                  </div>
                 </CardContent>
               </Card>
             ))}

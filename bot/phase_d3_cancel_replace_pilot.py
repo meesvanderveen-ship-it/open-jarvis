@@ -116,6 +116,33 @@ def _min_size_and_quote_from_position(position: Dict[str, Any]) -> Dict[str, Dec
 
 def _normalize_cancel_result(payload: Any, *, order_id: str) -> Dict[str, Any]:
     data = _as_dict(payload)
+    # Coinbase's real batch_cancel response is
+    # {"results": [{"success": bool, "order_id": ..., "failure_reason": ...}]},
+    # not a flat success_results/order_ids/cancelled_order_ids list (see
+    # bot/controlled_stop_market_exit_plan.py for the live incident this
+    # exact mismatch caused). Check the real shape first.
+    results = data.get("results") if isinstance(data.get("results"), list) else []
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        if order_id and str(item.get("order_id") or "").strip() != order_id:
+            continue
+        if bool(item.get("success")):
+            return {
+                "cancel_succeeded": True,
+                "cancel_raw_status": "BATCH_CANCELLED",
+                "cancel_normalized_status": "cancelled",
+                "cancel_error_type": "",
+                "cancel_error_message": "",
+            }
+        return {
+            "cancel_succeeded": False,
+            "cancel_raw_status": str(item.get("failure_reason") or "").strip().upper(),
+            "cancel_normalized_status": "unknown",
+            "cancel_error_type": "RuntimeError",
+            "cancel_error_message": str(item.get("failure_reason") or "cancel_response_not_confirmed"),
+        }
+
     order_ids = [str(item).strip() for item in (data.get("success_results") or data.get("order_ids") or data.get("cancelled_order_ids") or []) if str(item).strip()]
     if order_id and order_id in order_ids:
         return {

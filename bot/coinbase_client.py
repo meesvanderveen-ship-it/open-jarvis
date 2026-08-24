@@ -422,6 +422,32 @@ class CoinbaseClient:
         value, _present = _balance_value(acc, "hold", "hold_balance", "hold_balance_value", "on_hold", "locked")
         return self._to_decimal(value, "0")
 
+    def get_all_balances(self) -> Dict[str, Decimal]:
+        """Return {currency: available+hold balance} for every account with a
+        nonzero total balance. Used to price total portfolio equity (cash plus
+        every held asset's market value), not just the quote-currency cash
+        balance that get_available_balance() alone reports."""
+        accounts_payload = self.get_accounts()
+        balances: Dict[str, Decimal] = {}
+        for acc in _extract_accounts_list(accounts_payload):
+            currency = _account_currency(acc)
+            if not currency:
+                continue
+            available, _ = _balance_value(
+                acc,
+                "available_balance",
+                "available",
+                "available_balance_value",
+                "available_funds",
+                "cash_available",
+                "balance",
+            )
+            hold, _ = _balance_value(acc, "hold", "hold_balance", "hold_balance_value", "on_hold", "locked")
+            total = self._to_decimal(available, "0") + self._to_decimal(hold, "0")
+            if total > Decimal("0"):
+                balances[currency] = balances.get(currency, Decimal("0")) + total
+        return balances
+
     def get_spot_position(self, product_id: str) -> Dict[str, Any]:
         """
         Geeft de echte exchange-balances terug voor BASE en QUOTE van een product.
@@ -665,6 +691,59 @@ class CoinbaseClient:
                     "base_size": format(base_size, "f"),
                     "limit_price": format(limit_price, "f"),
                     "post_only": bool(post_only),
+                }
+            },
+        }
+        return self._request(
+            "POST",
+            "/api/v3/brokerage/orders",
+            payload=payload,
+        )
+
+    def place_limit_order_ioc(
+        self,
+        ticker: str,
+        side: str,
+        base_size: Decimal,
+        limit_price: Decimal,
+        client_order_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Place a Coinbase Advanced Trade IOC (immediate-or-cancel) limit order.
+
+        Reserved for the governed Mode B controlled-stop-exit route
+        (bot/controlled_stop_market_exit_plan.py): a near-market limit price
+        bounds slippage, and IOC guarantees no resting order is left behind
+        if it doesn't fill immediately (unlike GTC). Never used for entries
+        or ordinary take-profit/reduce exits, which stay GTC via
+        place_limit_order.
+        """
+        ticker = self._normalize_product_id(ticker)
+        side = side.upper().strip()
+
+        if side not in {"BUY", "SELL"}:
+            raise ValueError("side moet BUY of SELL zijn")
+        if base_size <= Decimal("0"):
+            raise ValueError("base_size moet > 0 zijn")
+        if limit_price <= Decimal("0"):
+            raise ValueError("limit_price moet > 0 zijn")
+
+        client_oid = client_order_id or str(uuid.uuid4())
+        payload = {
+            "client_order_id": client_oid,
+            "product_id": ticker,
+            "side": side,
+            "order_configuration": {
+                # Coinbase Advanced Trade has no "limit_limit_ioc" order_configuration
+                # variant -- the API rejects it outright with a proto "unknown field"
+                # 400 (confirmed live 2026-07-08: 7 consecutive controlled-stop-exit
+                # submits all failed this way, leaving a stop-breached position
+                # unprotected for 6+ hours). "sor_limit_ioc" (smart-order-routed limit
+                # IOC) is Coinbase's actual field for this order shape; it's already
+                # used successfully elsewhere in this codebase for the same
+                # near-market-limit-IOC pattern (tools/execute_controlled_btc_position_close.py).
+                "sor_limit_ioc": {
+                    "base_size": format(base_size, "f"),
+                    "limit_price": format(limit_price, "f"),
                 }
             },
         }

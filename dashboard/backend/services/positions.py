@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dashboard.backend.security.safe_paths import resolve_state_file
+from dashboard.backend.services.ticker_universe import filter_to_allowed_tickers
 from dashboard.backend.services.util import read_json_file
 
 
@@ -18,6 +19,14 @@ def get_positions() -> dict:
         entry["ticker"] = ticker
         entry["is_open"] = entry.get("close_time") is None
         positions.append(entry)
+
+    # Open positions always stay visible regardless of the current ticker
+    # universe (a real, currently-held position must never be hidden just
+    # because ALLOWED_TICKERS shrank) -- only closed/historical positions for
+    # tickers the bot no longer follows are filtered out.
+    open_positions = [p for p in positions if p["is_open"]]
+    closed_positions = filter_to_allowed_tickers([p for p in positions if not p["is_open"]])
+    positions = open_positions + closed_positions
 
     open_count = sum(1 for p in positions if p["is_open"])
     # A closed position can still carry a leftover position_risk_incomplete=true

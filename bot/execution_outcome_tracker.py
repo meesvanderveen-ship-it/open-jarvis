@@ -10,6 +10,24 @@ from bot.decision_outcome_tracker import extract_candles
 from bot.growbot_river_learning_contract import build_learning_context_snapshot
 
 
+def _safe_market_regime_label(value: Any) -> Optional[str]:
+    """Defensively normalize a raw market_regime value before it is stored.
+
+    Mirrors the guards in growbot_river_learning_contract._normalized_regime and
+    overfit_risk_model.normalize_label so a non-string upstream value (e.g. a
+    stringified regime dict from an older serialization path) cannot leak a
+    garbled label into state/decision_outcomes.json. None stays None.
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if len(text) > 40 or any(ch in text for ch in "{}[]:"):
+        return "unknown"
+    return text.lower().replace(" ", "_")
+
+
 EXECUTION_OUTCOME_LABELS = {
     "good_limit_execution",
     "bad_limit_execution",
@@ -182,7 +200,7 @@ def build_paper_execution_outcome(order: Dict[str, Any], evaluation: Dict[str, A
         "sample_size": 1,
         "recency": "fresh",
         "setup_type": order.get("setup_type") or (order.get("gpt_output") or {}).get("setup_type"),
-        "market_regime": order.get("market_regime"),
+        "market_regime": _safe_market_regime_label(order.get("market_regime")),
         "timeframe": order.get("timeframe") or "phase_b_paper_lifecycle",
         "btc_eth_context": order.get("btc_eth_context"),
         "overfit_warning": "single_paper_sample_do_not_change_hard_rules",
@@ -329,7 +347,7 @@ def build_paper_no_fill_followup_outcome(
         "sample_size": 1,
         "recency": "fresh",
         "setup_type": order.get("setup_type") or (order.get("gpt_output") or {}).get("setup_type"),
-        "market_regime": order.get("market_regime"),
+        "market_regime": _safe_market_regime_label(order.get("market_regime")),
         "timeframe": order.get("timeframe") or "phase_b_paper_no_fill_followup",
         "btc_eth_context": order.get("btc_eth_context"),
         "overfit_warning": "single_paper_followup_sample_do_not_change_hard_rules",

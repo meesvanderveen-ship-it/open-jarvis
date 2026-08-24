@@ -28,6 +28,8 @@ FAST_START_AUTOTUNE_ALLOWED_PARAMETERS = frozenset({
     "PHASE_D2_MIN_REWARD_TO_FEE_RATIO",
     "PHASE_D2_MIN_REWARD_TO_RISK_RATIO",
     "MAX_SPREAD_PCT",
+    "EXIT_TARGET_MAX_DISTANCE_FROM_MID_PCT",
+    "STOP_DISTANCE_PCT",
 })
 
 # Allowlisted for fast_start, but the suggested step is halved versus the normal
@@ -203,7 +205,7 @@ _PARAMETERS: Tuple[LearnableParameter, ...] = (
     _p("TP1_ALLOCATION_PCT", "exit_d3", 0.50, 0.20, 0.90, "fraction", "increase", ("D2_exit_slices", "min_order_quote"), ("partial_tp_outcomes", "min_size_fallbacks"), implementation_status="logical_candidate_only"),
     _p("TP2_ALLOCATION_PCT", "exit_d3", 0.25, 0.00, 0.60, "fraction", "increase", ("D2_exit_slices", "TP1_ALLOCATION_PCT"), ("partial_tp_outcomes", "runner_outcomes"), implementation_status="logical_candidate_only"),
     _p("RUNNER_ALLOCATION_PCT", "exit_d3", 0.25, 0.00, 0.60, "fraction", "increase", ("D2_exit_slices", "TP1_ALLOCATION_PCT", "TP2_ALLOCATION_PCT"), ("runner_outcomes", "trailing_path_simulation"), implementation_status="logical_candidate_only"),
-    _p("STOP_DISTANCE_PCT", "exit_d3", 0.0200, 0.0050, 0.1000, "decimal_pct", "increase", ("D2_risk_plan", "position_sizing"), ("mae_distribution", "avoided_loss", "risk_tail"), implementation_status="logical_candidate_only"),
+    _p("STOP_DISTANCE_PCT", "exit_d3", 0.0200, 0.0050, 0.1000, "decimal_pct", "increase", ("D2_risk_plan", "position_sizing"), ("mae_distribution", "avoided_loss", "risk_tail")),
     # Regime and market filters.
     _p("TICKER_SCORE_MIN", "regime_market_filters", 50.0, 20.0, 90.0, "score", "decrease", ("ticker_ranking", "market_breadth"), ("ticker_score_outcomes", "regime_coverage"), implementation_status="logical_candidate_only"),
     _p("VOLUME_CONFIRMATION_MIN", "regime_market_filters", 1.0, 0.25, 3.0, "multiplier", "decrease", ("volume_features",), ("volume_segmented_outcomes", "fill_quality"), implementation_status="logical_candidate_only"),

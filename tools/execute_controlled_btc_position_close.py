@@ -365,20 +365,24 @@ def _place_near_market_limit_ioc(
     base_size: Decimal,
     limit_price: Decimal,
 ) -> Dict[str, Any]:
-    payload = {
-        "client_order_id": client_order_id,
-        "product_id": _normalize_ticker(ticker),
-        "side": "SELL",
-        "order_configuration": {
-            "sor_limit_ioc": {
-                "base_size": format(base_size, "f"),
-                "limit_price": format(limit_price, "f"),
-            }
-        },
-    }
-    if hasattr(coinbase_client, "place_near_market_limit_ioc_sell"):
-        return _as_dict(coinbase_client.place_near_market_limit_ioc_sell(ticker, base_size, limit_price, client_order_id))
-    return _as_dict(coinbase_client._request("POST", "/api/v3/brokerage/orders", payload=payload))
+    # Delegate to the shared CoinbaseClient.place_limit_order_ioc rather than
+    # re-building the sor_limit_ioc order_configuration payload here. This file
+    # used to hand-roll its own copy of that payload (and call the private
+    # coinbase_client._request directly, since place_near_market_limit_ioc_sell
+    # was never actually a real CoinbaseClient method -- the hasattr check
+    # always fell through). Two independent implementations of the same order
+    # shape is exactly how bot/coinbase_client.py's own copy carried an invalid
+    # field name (limit_limit_ioc instead of sor_limit_ioc) for months without
+    # this file's already-correct copy ever revealing the mismatch: confirmed
+    # live 2026-07-08, when that bug left a stop-breached position unprotected
+    # for 6+ hours. A single shared implementation can't drift from itself.
+    return _as_dict(coinbase_client.place_limit_order_ioc(
+        ticker=ticker,
+        side="SELL",
+        base_size=base_size,
+        limit_price=limit_price,
+        client_order_id=client_order_id,
+    ))
 
 
 def _extract_submitted_order_id(response: Dict[str, Any]) -> str:

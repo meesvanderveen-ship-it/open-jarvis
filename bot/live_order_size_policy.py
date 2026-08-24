@@ -42,11 +42,18 @@ def effective_exit_min_quote(cfg: Any = None, product_min_quote: Any = None) -> 
 
 
 def max_live_exit_quote(cfg: Any = None, *, label: Any = "") -> Decimal:
-    """Return the explicitly separate D3/controlled-stop close capacity."""
+    """Return the explicitly separate D3/controlled-stop close capacity.
+
+    No longer hard-clamped to the legacy MAX_LIVE_EXIT_ORDER_QUOTE_USDC
+    constant: entries and exits scale with portfolio_value_usdc
+    (strategy_engine._apply_portfolio_based_entry_sizing), so a fixed dollar
+    ceiling here would silently truncate or block full-close/stop-loss exits
+    on any position sized above the old fixed band. The constant remains only
+    as the fallback default when cfg has no explicit override.
+    """
     label_text = str(label or "").strip().upper()
     attr = "controlled_stop_exit_max_quote_usd" if label_text in {"STOP_EXIT", "CONTROLLED_STOP_EXIT", "RISK_CLOSE"} else "phase_d3_max_exit_order_quote"
-    configured = to_decimal(getattr(cfg, attr, MAX_LIVE_EXIT_ORDER_QUOTE_USDC), str(MAX_LIVE_EXIT_ORDER_QUOTE_USDC))
-    return min(configured, MAX_LIVE_EXIT_ORDER_QUOTE_USDC)
+    return to_decimal(getattr(cfg, attr, MAX_LIVE_EXIT_ORDER_QUOTE_USDC), str(MAX_LIVE_EXIT_ORDER_QUOTE_USDC))
 
 
 def validate_entry_quote_size(quote: Any, cfg: Any = None) -> Dict[str, Any]:

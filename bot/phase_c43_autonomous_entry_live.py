@@ -109,6 +109,7 @@ def _derive_entry_protective_levels(
     local_order: Dict[str, Any],
     trade_plan: Dict[str, Any],
     entry_price: Any,
+    min_stop_distance_pct: Decimal,
 ) -> Dict[str, Any]:
     entry = _to_decimal(entry_price, "0")
     candidates_stop = (
@@ -156,6 +157,16 @@ def _derive_entry_protective_levels(
         if invalidation >= entry:
             invalidation = stop
             source = "conservative_entry_fill_fallback"
+        if min_stop_distance_pct > ZERO:
+            floor = entry * (Decimal("1") - min_stop_distance_pct)
+            if ZERO < stop < entry and stop > floor:
+                stop = floor
+                if source == "explicit_entry_risk":
+                    source = "widened_to_minimum_stop_distance_floor"
+            if ZERO < invalidation < entry and invalidation > floor:
+                invalidation = floor
+                if source == "explicit_entry_risk":
+                    source = "widened_to_minimum_stop_distance_floor"
     complete = bool(entry > ZERO and stop > ZERO and invalidation > ZERO and stop < entry and invalidation < entry)
     return {
         "stop_price": str(stop if stop > ZERO else ZERO),
@@ -213,7 +224,7 @@ def _apply_dynamic_entry_sizing(
 
     This is intentionally at the C4.3 boundary, immediately before the live
     risk guard and Coinbase payload builder.  Consequently no earlier planner
-    or judge supplied quote can bypass the 50--100 USDC policy.
+    or judge supplied quote can bypass the 10-20%-of-portfolio sizing policy.
     """
     sized_analysis = dict(analysis or {})
     sized_order = dict(order_intent or {})
@@ -446,7 +457,13 @@ def build_phase_c43_deterministic_live_risk_snapshot(
 
     allowed = set(_allowed_tickers(cfg))
     quote = _to_decimal(order.get("size_quote") or judge.get("size_quote") or judge.get("quote_size"), "0")
-    max_quote = min(_cfg_dec(cfg, "phase_c_max_order_quote", C43_MAX_QUOTE), _cfg_dec(cfg, "autonomous_max_order_quote", C43_MAX_QUOTE), C43_MAX_QUOTE)
+    # No longer hard-clamped to C43_MAX_QUOTE: entries scale with
+    # portfolio_value_usdc (strategy_engine._apply_portfolio_based_entry_sizing
+    # writes the current portfolio-scaled value onto both cfg fields below
+    # every cycle), so clamping to the legacy fixed 100.00 here would silently
+    # re-cap every entry back to the old fixed-USDC band. C43_MAX_QUOTE
+    # remains the fallback default only for a cfg that has no override.
+    max_quote = min(_cfg_dec(cfg, "phase_c_max_order_quote", C43_MAX_QUOTE), _cfg_dec(cfg, "autonomous_max_order_quote", C43_MAX_QUOTE))
     max_open = min(_cfg_int(cfg, "phase_c_max_open_entry_orders", C43_MAX_OPEN_ORDERS), _cfg_int(cfg, "autonomous_max_open_orders", C43_MAX_OPEN_ORDERS), C43_MAX_OPEN_ORDERS)
     max_new = min(_cfg_int(cfg, "phase_c_max_new_orders_per_cycle", 1), _cfg_int(cfg, "autonomous_max_new_orders_per_cycle", 1), 1)
     open_entry_tickers = {
@@ -772,6 +789,7 @@ def _build_phase_c43_guard_and_submit_preparation_unlocked(
             local_order=order_intent or {},
             trade_plan=trade_plan_snapshot,
             entry_price=gtc.get("limit_price") or payload.get("limit_price") or payload.get("limit_price_requested"),
+            min_stop_distance_pct=_to_decimal(getattr(cfg, "stop_distance_pct", None), "0.02"),
         )
         record = {
             "client_order_id": client_oid,
@@ -834,6 +852,7 @@ def _build_phase_c43_guard_and_submit_preparation_unlocked(
             local_order=order_intent or {},
             trade_plan=trade_plan_snapshot,
             entry_price=gtc.get("limit_price") or payload.get("limit_price") or payload.get("limit_price_requested"),
+            min_stop_distance_pct=_to_decimal(getattr(cfg, "stop_distance_pct", None), "0.02"),
         )
         record = {
             "client_order_id": client_oid,
@@ -1173,7 +1192,14 @@ def _reconcile_phase_c43_fills_to_positions_unlocked(
             position = None
             position_transition = "created_from_fill"
             existing_position = state_store.get_position(ticker) if hasattr(state_store, "get_position") else None
-            if isinstance(existing_position, dict):
+            existing_position_status = str((existing_position or {}).get("status") or "open").strip().lower()
+            # A closed position left under this ticker key (positions.json keeps a
+            # permanent record per ticker, not per trade) must not be treated as a
+            # live conflict: it belongs to a prior, already-closed trade, so a fresh
+            # fill under a different order id is a legitimate re-entry, not an
+            # ambiguous double-open. Only a still-open/active record under this
+            # ticker with unrelated order ids is a genuine conflict worth blocking.
+            if isinstance(existing_position, dict) and existing_position_status in {"open", "active"}:
                 known_fill_ids = {
                     str(existing_position.get("phase_c43_client_order_id") or "").strip(),
                     str(existing_position.get("phase_c43_exchange_order_id") or "").strip(),
@@ -1208,12 +1234,22 @@ def _reconcile_phase_c43_fills_to_positions_unlocked(
                     local_order=local,
                     trade_plan=trade_plan,
                     entry_price=avg_price,
+                    min_stop_distance_pct=_to_decimal(getattr(cfg, "stop_distance_pct", None), "0.02"),
                 )
                 stop_price = protective_levels["stop_price"]
                 invalidation_price = protective_levels["invalidation_price"]
+                setup_type_value = str(local.get("setup_type") or trade_plan.get("setup_type") or "")
                 extra.update({
                     "source_trade_plan_id": str(local.get("trade_plan_id") or trade_plan.get("plan_id") or ""),
-                    "source_setup_type": str(local.get("setup_type") or trade_plan.get("setup_type") or ""),
+                    # setup_type (not just the source_* audit copy) is what
+                    # position_manager._get_position_setup_type() actually
+                    # reads to pick a trailing-stop tier (trend_continuation /
+                    # reclaim_reversal / mean_reversion). Before this fix only
+                    # source_setup_type was ever set here, so every live
+                    # position silently fell back to the generic "unclear"
+                    # tier regardless of its real setup.
+                    "setup_type": setup_type_value,
+                    "source_setup_type": setup_type_value,
                     "stop_price": stop_price,
                     "invalidation_price": invalidation_price,
                     "entry_risk_source": protective_levels["risk_source"],

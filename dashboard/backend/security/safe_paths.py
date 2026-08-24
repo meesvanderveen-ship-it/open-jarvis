@@ -31,6 +31,7 @@ ALLOWED_STATE_FILES = {
     "market_intelligence_context.json",
     "neural_shadow_policy.json",
     "approved_parameter_profile.json",
+    "runtime_ticker_universe.json",
 }
 
 _DENY_NAME_PARTS = (".env", ".git", ".ssh", "__pycache__")

@@ -9,7 +9,7 @@ def test_planner_prompt_requires_prepare_buy_for_positive_ev_defined_risk():
     assert "positive-EV context exists" in prompt
     assert "prepare_buy" in prompt
     assert "starter/probe" in prompt
-    assert "50.00-100.00" in prompt
+    assert "10-20% of risk_context.portfolio_value_usdc" in prompt
     assert "quote_size_below_min_live_order_quote" in prompt
     assert "no_plan must name the concrete blocker" in prompt
 
@@ -27,8 +27,8 @@ def test_final_judge_prompt_enforces_objective_score_and_size_band():
     assert "valid_trade_plan" in prompt
     assert "judge_reasons" in prompt
     assert "trigger_wait_reason" in prompt
-    assert "50.00 and 100.00 USDC" in prompt
-    assert "Starter probe entries (50 USDC) are valid when" in prompt
+    assert "10-20% of risk_context.portfolio_value_usdc" in prompt
+    assert "Starter probe entries (near the 10% portfolio-value floor) are valid when" in prompt
     assert "objective_score is positive" in prompt
     assert "neural_shadow_policy" in prompt
     assert "Do not allow market orders." in prompt

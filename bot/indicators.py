@@ -17,7 +17,11 @@ def rsi(series: pd.Series, period: int = 14) -> pd.Series:
     ma_down = down.ewm(alpha=1 / period, adjust=False).mean()
 
     rs = ma_up / ma_down.replace(0, np.nan)
-    return 100 - (100 / (1 + rs))
+    out = 100 - (100 / (1 + rs))
+    # No losses in the window (ma_down == 0) → RSI is canonically 100, not NaN.
+    # Leaving NaN here leaks a literal "NaN"/null into the LLM dossier. The leading
+    # warmup rows (ma_down is NaN, not 0) are preserved as NaN by the != comparison.
+    return out.where(ma_down != 0, 100.0)
 
 
 def true_range(df: pd.DataFrame) -> pd.Series:
@@ -40,11 +44,15 @@ def adx(df: pd.DataFrame, period: int = 14) -> pd.Series:
     low = df["low"]
     close = df["close"]
 
-    plus_dm = high.diff()
-    minus_dm = -low.diff()
+    raw_plus_dm = high.diff()
+    raw_minus_dm = -low.diff()
 
-    plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
-    minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
+    # Both directional-movement masks must compare against the RAW opposite value.
+    # The previous version overwrote plus_dm first, so minus_dm was masked against the
+    # already-zeroed plus_dm instead of the true +DM. .where() is non-mutating, so
+    # raw_plus_dm/raw_minus_dm remain the original diffs here.
+    plus_dm = raw_plus_dm.where((raw_plus_dm > raw_minus_dm) & (raw_plus_dm > 0), 0.0)
+    minus_dm = raw_minus_dm.where((raw_minus_dm > raw_plus_dm) & (raw_minus_dm > 0), 0.0)
 
     tr = true_range(df)
     atr_series = tr.ewm(alpha=1 / period, adjust=False).mean()

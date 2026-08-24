@@ -4,6 +4,8 @@ import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 from bot.adaptive_policy_lab import stable_payload_hash
 from bot.approved_parameter_profile import sha256_file
 from bot.autonomous_parameter_governor import (
@@ -11,9 +13,12 @@ from bot.autonomous_parameter_governor import (
     REQUIRED_ROLLBACK_ACK,
     acquire_governor_lock,
     adaptive_readiness_layers,
+    assess_activation_outcome,
     build_activation_plan,
     candidate_hash_valid,
     candidate_stale,
+    evaluate_pending_activation,
+    governor_settings,
     release_governor_lock,
     rollback_governor_profile,
     run_governor,
@@ -318,6 +323,238 @@ def test_cooldown_zero_still_blocks_reused_evidence_hash(tmp_path: Path) -> None
     status = validate_governor(root=tmp_path, env=_env(AUTONOMOUS_PARAMETER_MAX_CHANGES_PER_24H="99"), candidate=_candidate(), readiness_report=_readiness())
     assert "cooldown_active" not in status["blockers"]
     assert "reused_evidence_hash" in status["readiness_layers"]["apply_blockers"]
+
+
+def _old_activation_record(*, profile_hash: str, hours_ago: float = 48.0, **overrides: object) -> dict:
+    record = {
+        "generated_at": (datetime.now(timezone.utc) - timedelta(hours=hours_ago)).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+        "applied": True,
+        "evaluated": False,
+        "candidate_hash": "candidate-hash-1",
+        "evidence_hash": "evidence-hash-1",
+        "profile_hash": profile_hash,
+        "changed_parameter": "PHASE_D2_MIN_EXPECTED_NET_EDGE_PCT",
+    }
+    record.update(overrides)
+    return record
+
+
+def test_evaluate_pending_activation_waits_for_cooldown_not_elapsed(tmp_path: Path) -> None:
+    _write_base_state(tmp_path)
+    profile_hash = sha256_file(tmp_path / "state/approved_parameter_profile.json")
+    log = tmp_path / "state/autonomous_parameter_governor/activations.jsonl"
+    log.parent.mkdir(parents=True)
+    log.write_text(json.dumps(_old_activation_record(profile_hash=profile_hash, hours_ago=1.0)) + "\n", encoding="utf-8")
+
+    result = evaluate_pending_activation(root=tmp_path, settings=governor_settings(_env()))
+
+    assert result["performed"] is False
+    assert result["reason"] == "evaluation_cooldown_not_elapsed"
+    row = json.loads(log.read_text(encoding="utf-8").splitlines()[0])
+    assert row["evaluated"] is False
+
+
+def test_evaluate_pending_activation_marks_clean_after_cooldown_elapsed(tmp_path: Path) -> None:
+    _write_base_state(tmp_path)
+    profile_hash = sha256_file(tmp_path / "state/approved_parameter_profile.json")
+    log = tmp_path / "state/autonomous_parameter_governor/activations.jsonl"
+    log.parent.mkdir(parents=True)
+    log.write_text(json.dumps(_old_activation_record(profile_hash=profile_hash, hours_ago=48.0)) + "\n", encoding="utf-8")
+
+    result = evaluate_pending_activation(root=tmp_path, settings=governor_settings(_env()))
+
+    assert result["performed"] is True
+    assert result["reason"] == "clean_no_errors_observed"
+    row = json.loads(log.read_text(encoding="utf-8").splitlines()[0])
+    assert row["evaluated"] is True
+    assert row["evaluation_method"] == "time_and_health_check_auto"
+    assert row["evaluation_outcome"] == "clean_no_errors_observed"
+
+
+def test_evaluate_pending_activation_detects_manual_rollback_via_hash_mismatch(tmp_path: Path) -> None:
+    _write_base_state(tmp_path)
+    log = tmp_path / "state/autonomous_parameter_governor/activations.jsonl"
+    log.parent.mkdir(parents=True)
+    log.write_text(json.dumps(_old_activation_record(profile_hash="stale-hash-from-before-manual-rollback", hours_ago=48.0)) + "\n", encoding="utf-8")
+
+    result = evaluate_pending_activation(root=tmp_path, settings=governor_settings(_env()))
+
+    assert result["performed"] is True
+    assert result["reason"] == "superseded_by_manual_rollback"
+    row = json.loads(log.read_text(encoding="utf-8").splitlines()[0])
+    assert row["evaluated"] is True
+    assert row["evaluation_outcome"] == "superseded_by_manual_rollback"
+
+
+def test_evaluate_pending_activation_blocked_by_errors_since_activation(tmp_path: Path) -> None:
+    _write_base_state(tmp_path)
+    profile_hash = sha256_file(tmp_path / "state/approved_parameter_profile.json")
+    log = tmp_path / "state/autonomous_parameter_governor/activations.jsonl"
+    log.parent.mkdir(parents=True)
+    log.write_text(json.dumps(_old_activation_record(profile_hash=profile_hash, hours_ago=48.0)) + "\n", encoding="utf-8")
+    errors_log = tmp_path / "logs/errors.jsonl"
+    errors_log.parent.mkdir(parents=True)
+    recent_error_at = (datetime.now(timezone.utc) - timedelta(hours=2)).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    errors_log.write_text(json.dumps({"generated_at": recent_error_at, "error": "lifecycle_error"}) + "\n", encoding="utf-8")
+
+    result = evaluate_pending_activation(root=tmp_path, settings=governor_settings(_env()))
+
+    assert result["performed"] is False
+    assert result["reason"] == "errors_observed_since_activation"
+    row = json.loads(log.read_text(encoding="utf-8").splitlines()[0])
+    assert row["evaluated"] is False
+
+
+def test_evaluate_pending_activation_idempotent_once_evaluated(tmp_path: Path) -> None:
+    _write_base_state(tmp_path)
+    profile_hash = sha256_file(tmp_path / "state/approved_parameter_profile.json")
+    log = tmp_path / "state/autonomous_parameter_governor/activations.jsonl"
+    log.parent.mkdir(parents=True)
+    log.write_text(json.dumps(_old_activation_record(profile_hash=profile_hash, hours_ago=48.0, evaluated=True, evaluation_outcome="clean_no_errors_observed")) + "\n", encoding="utf-8")
+
+    result = evaluate_pending_activation(root=tmp_path, settings=governor_settings(_env()))
+
+    assert result["performed"] is False
+    assert result["reason"] == "already_evaluated"
+
+
+def _decision_outcome_record(*, created_at: str, decision_category: str, outcome_label: str) -> dict:
+    return {
+        "created_at": created_at,
+        "status": "resolved",
+        "decision_category": decision_category,
+        "outcome": {"outcome_label": outcome_label},
+    }
+
+
+def _write_decision_outcomes(root: Path, records: list) -> None:
+    path = root / "state/decision_outcomes.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"records": records}), encoding="utf-8")
+
+
+def _wait_records(*, start: datetime, count: int, missed: int) -> list:
+    records = []
+    for i in range(count):
+        label = "missed_opportunity" if i < missed else "correct_avoid"
+        ts = (start + timedelta(minutes=i)).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        records.append(_decision_outcome_record(created_at=ts, decision_category="wait", outcome_label=label))
+    return records
+
+
+def test_assess_activation_outcome_insufficient_sample_is_not_a_regression(tmp_path: Path) -> None:
+    generated_at = (datetime.now(timezone.utc) - timedelta(hours=48)).isoformat()
+    evaluated_at = datetime.now(timezone.utc).isoformat()
+    _write_decision_outcomes(
+        tmp_path,
+        _wait_records(start=datetime.now(timezone.utc) - timedelta(hours=60), count=5, missed=4)
+        + _wait_records(start=datetime.now(timezone.utc) - timedelta(hours=1), count=5, missed=4),
+    )
+    result = assess_activation_outcome(root=tmp_path, generated_at=generated_at, evaluated_at=evaluated_at, min_sample_size=100, regression_threshold_pct=5.0)
+    assert result["available"] is False
+    assert result["reason"] == "insufficient_sample"
+    assert result["regressed"] is False
+
+
+def test_assess_activation_outcome_detects_regression(tmp_path: Path) -> None:
+    generated_at = (datetime.now(timezone.utc) - timedelta(hours=48)).isoformat()
+    evaluated_at = datetime.now(timezone.utc).isoformat()
+    before = _wait_records(start=datetime.now(timezone.utc) - timedelta(hours=60), count=100, missed=20)
+    after = _wait_records(start=datetime.now(timezone.utc) + timedelta(minutes=1), count=100, missed=40)
+    _write_decision_outcomes(tmp_path, before + after)
+    result = assess_activation_outcome(root=tmp_path, generated_at=generated_at, evaluated_at=evaluated_at, min_sample_size=100, regression_threshold_pct=5.0)
+    assert result["available"] is True
+    assert result["missed_opportunity_rate_before"] == pytest.approx(0.20)
+    assert result["missed_opportunity_rate_after"] == pytest.approx(0.40)
+    assert result["deltas_pct"]["missed_opportunity_rate_delta_pct"] == pytest.approx(20.0)
+    assert result["regressed"] is True
+
+
+def test_assess_activation_outcome_small_delta_within_threshold_is_not_regression(tmp_path: Path) -> None:
+    generated_at = (datetime.now(timezone.utc) - timedelta(hours=48)).isoformat()
+    evaluated_at = datetime.now(timezone.utc).isoformat()
+    before = _wait_records(start=datetime.now(timezone.utc) - timedelta(hours=60), count=100, missed=20)
+    after = _wait_records(start=datetime.now(timezone.utc) + timedelta(minutes=1), count=100, missed=22)
+    _write_decision_outcomes(tmp_path, before + after)
+    result = assess_activation_outcome(root=tmp_path, generated_at=generated_at, evaluated_at=evaluated_at, min_sample_size=100, regression_threshold_pct=5.0)
+    assert result["available"] is True
+    assert result["regressed"] is False
+
+
+def test_evaluate_pending_activation_regression_without_flag_only_reports(tmp_path: Path) -> None:
+    _write_base_state(tmp_path)
+    profile_hash = sha256_file(tmp_path / "state/approved_parameter_profile.json")
+    log = tmp_path / "state/autonomous_parameter_governor/activations.jsonl"
+    log.parent.mkdir(parents=True)
+    log.write_text(json.dumps(_old_activation_record(profile_hash=profile_hash, hours_ago=48.0)) + "\n", encoding="utf-8")
+    before = _wait_records(start=datetime.now(timezone.utc) - timedelta(hours=60), count=100, missed=20)
+    after = _wait_records(start=datetime.now(timezone.utc) + timedelta(minutes=1), count=100, missed=40)
+    _write_decision_outcomes(tmp_path, before + after)
+
+    result = evaluate_pending_activation(root=tmp_path, settings=governor_settings(_env()))
+
+    assert result["performed"] is True
+    assert result["reason"] == "regressed_recommend_manual_review"
+    assert result["outcome_assessment"]["regressed"] is True
+    row = json.loads(log.read_text(encoding="utf-8").splitlines()[0])
+    assert row["evaluation_outcome"] == "regressed_recommend_manual_review"
+    # No auto-rollback: the approved profile must be untouched.
+    assert sha256_file(tmp_path / "state/approved_parameter_profile.json") == profile_hash
+
+
+def test_evaluate_pending_activation_regression_with_flag_executes_auto_rollback(tmp_path: Path) -> None:
+    _write_base_state(tmp_path)
+    profile_hash = sha256_file(tmp_path / "state/approved_parameter_profile.json")
+    log = tmp_path / "state/autonomous_parameter_governor/activations.jsonl"
+    log.parent.mkdir(parents=True)
+    log.write_text(json.dumps(_old_activation_record(profile_hash=profile_hash, hours_ago=48.0)) + "\n", encoding="utf-8")
+    before = _wait_records(start=datetime.now(timezone.utc) - timedelta(hours=60), count=100, missed=20)
+    after = _wait_records(start=datetime.now(timezone.utc) + timedelta(minutes=1), count=100, missed=40)
+    _write_decision_outcomes(tmp_path, before + after)
+
+    # A pre-change backup + rollback plan, exactly what run_governor() writes
+    # at apply time.
+    backup_dir = tmp_path / "state/autonomous_parameter_governor/backups"
+    backup_dir.mkdir(parents=True)
+    backup_path = backup_dir / "approved_parameter_profile.before_test.json"
+    backup_content = json.dumps({"parameters": {"OLD": "1"}})
+    backup_path.write_text(backup_content, encoding="utf-8")
+    rollback_plan_path = tmp_path / "reports/autonomous_parameter_governor/rollback/latest-rollback-plan.json"
+    rollback_plan_path.parent.mkdir(parents=True)
+    rollback_plan_path.write_text(json.dumps({"backup_profile_path": str(backup_path)}), encoding="utf-8")
+
+    result = evaluate_pending_activation(
+        root=tmp_path,
+        settings=governor_settings(_env(AUTONOMOUS_PARAMETER_AUTO_ROLLBACK_ON_REGRESSION="true")),
+    )
+
+    assert result["performed"] is True
+    assert result["reason"] == "regressed_auto_rolled_back"
+    assert result["outcome_assessment"]["auto_rollback_result"]["applied"] is True
+    # The approved profile was actually restored from the backup.
+    assert (tmp_path / "state/approved_parameter_profile.json").read_text(encoding="utf-8") == backup_content
+    row = json.loads(log.read_text(encoding="utf-8").splitlines()[0])
+    assert row["evaluation_outcome"] == "regressed_auto_rolled_back"
+
+
+def test_run_governor_apply_clears_stuck_evaluation_gate_and_applies_next_change(tmp_path: Path) -> None:
+    """Regression test for the 2026-06-22..2026-07-05 stuck state: nothing ever
+    set `evaluated: true`, so `previous_activation_not_evaluated` blocked every
+    activation after the first, forever, regardless of new evidence quality."""
+    _write_base_state(tmp_path)
+    profile_hash = sha256_file(tmp_path / "state/approved_parameter_profile.json")
+    log = tmp_path / "state/autonomous_parameter_governor/activations.jsonl"
+    log.parent.mkdir(parents=True)
+    log.write_text(json.dumps(_old_activation_record(profile_hash=profile_hash, hours_ago=48.0, evidence_hash="evidence-hash-old")) + "\n", encoding="utf-8")
+
+    result = run_governor(root=tmp_path, env=_env(), candidate=_candidate(), readiness_report=_readiness(), apply=True)
+
+    assert result["applied"] is True
+    assert result["reason"] == "applied"
+    lines = log.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2
+    assert json.loads(lines[0])["evaluated"] is True
+    assert json.loads(lines[1])["applied"] is True
 
 
 def test_readiness_layers_require_apply_regimes_coverage_and_gates() -> None:

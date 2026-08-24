@@ -299,8 +299,15 @@ def build_phase_d3_full_close_exit_intent(
     label: str = "FULL_CLOSE",
     source_reason: str = "",
     market_evidence_price: Any = None,
+    is_full_close: bool = True,
 ) -> Dict[str, Any]:
-    """Build a post-only D.3 discretionary full-close SELL intent.
+    """Build a post-only D.3 discretionary SELL intent (full close or partial reduce).
+
+    is_full_close controls only the min-order-quote exemption in
+    validate_exit_quote_size: a full close may dump a below-minimum residual
+    (nothing to leave behind), a partial reduce may not (it can just wait
+    instead of forcing an under-minimum partial sell). Sizing itself already
+    accepts any requested_base_size <= available_base for both cases.
 
     This is deliberately not a stop/invalidation exit route.  Stop and risk
     closes require the controlled stop-exit workflow, whose near-market IOC
@@ -311,7 +318,13 @@ def build_phase_d3_full_close_exit_intent(
     position_base = _position_base(position)
     reserved_base = _reserved_base_for_position(order_store, ticker=selected_ticker, position_id=position_id)
     available_base = max(ZERO, position_base - reserved_base)
-    max_quote = min(_cfg_dec(cfg, "phase_d3_max_exit_order_quote", D3_MAX_EXIT_QUOTE), D3_MAX_EXIT_QUOTE)
+    # No longer hard-clamped to D3_MAX_EXIT_QUOTE: exits scale with
+    # portfolio_value_usdc the same way entries do (see
+    # strategy_engine._apply_portfolio_based_entry_sizing), so re-clamping to
+    # the legacy fixed 120.00 here would silently truncate a full-close on any
+    # position sized above the old fixed band. D3_MAX_EXIT_QUOTE remains the
+    # fallback default only for a cfg with no override.
+    max_quote = _cfg_dec(cfg, "phase_d3_max_exit_order_quote", D3_MAX_EXIT_QUOTE)
     increment = _base_increment(exchange_rules)
     price_increment = _price_increment(exchange_rules)
     min_quote = max(_min_order_quote(exchange_rules), _cfg_dec(cfg, "min_live_order_quote_usdc", Decimal("20.00")))
@@ -360,7 +373,7 @@ def build_phase_d3_full_close_exit_intent(
         estimated_quote=estimated_quote,
         cfg=cfg,
         label=label,
-        is_full_close=True,
+        is_full_close=is_full_close,
         product_min_quote=min_quote,
     )
     blockers.extend(quote_policy["blockers"])
@@ -412,6 +425,122 @@ def build_phase_d3_full_close_exit_intent(
             "max_market_evidence_deviation_pct": str(max_price_deviation),
             "market_order_allowed": False,
             "stop_or_invalidation_route": "controlled_stop_exit_required",
+        },
+    })
+
+
+def build_phase_d3_take_profit_resting_exit_intent(
+    *,
+    cfg: Any,
+    ticker: str,
+    position: Dict[str, Any],
+    order_store: Optional[OrderStore] = None,
+    orderbook_context: Optional[Dict[str, Any]] = None,
+    exchange_rules: Optional[Dict[str, Any]] = None,
+    label: str = "TP1",
+    source_reason: str = "",
+) -> Dict[str, Any]:
+    """Build a post-only D.3 SELL intent resting AT the position's own
+    take_profit_price, sized to the full position.
+
+    Deliberately distinct from build_phase_d3_full_close_exit_intent, which
+    prices at best_ask_plus_one_tick for an immediate discretionary exit.
+    This one is meant to sit on the book *ahead of time* so a fast move
+    through the target fills automatically between cycles, instead of only
+    being noticed and acted on reactively next cycle/heartbeat. It does not
+    re-apply the D.2 take-profit-bracket fee-edge gate (assess_minimum_net_edge):
+    that question was already answered when the position/plan was opened;
+    resting a limit order here does not open a new speculative trade.
+    """
+    selected_ticker = _normalize_ticker(ticker or position.get("ticker"))
+    position_id = _position_id(position)
+    position_base = _position_base(position)
+    reserved_base = _reserved_base_for_position(order_store, ticker=selected_ticker, position_id=position_id)
+    available_base = max(ZERO, position_base - reserved_base)
+    # No longer hard-clamped to D3_MAX_EXIT_QUOTE: exits scale with
+    # portfolio_value_usdc the same way entries do (see
+    # strategy_engine._apply_portfolio_based_entry_sizing), so re-clamping to
+    # the legacy fixed 120.00 here would silently truncate a full-close on any
+    # position sized above the old fixed band. D3_MAX_EXIT_QUOTE remains the
+    # fallback default only for a cfg with no override.
+    max_quote = _cfg_dec(cfg, "phase_d3_max_exit_order_quote", D3_MAX_EXIT_QUOTE)
+    increment = _base_increment(exchange_rules)
+    price_increment = _price_increment(exchange_rules)
+    min_quote = max(_min_order_quote(exchange_rules), _cfg_dec(cfg, "min_live_order_quote_usdc", Decimal("20.00")))
+    orderbook = _as_dict(orderbook_context)
+    best_bid = _market_decimal(orderbook, "best_bid", "bid")
+    take_profit_price = _to_decimal(position.get("take_profit_price"), "0")
+    risk_state = position_protective_risk_state(position, None)
+    blockers: List[str] = []
+    warnings: List[str] = []
+
+    if position_base <= ZERO:
+        blockers.append("position_base_missing_or_zero")
+    if available_base <= ZERO:
+        blockers.append("no_available_base_after_existing_exit_reservations")
+    if not risk_state["complete"]:
+        blockers.append("position_risk_incomplete_stop_or_invalidation_missing")
+    if take_profit_price <= ZERO:
+        blockers.append("take_profit_price_missing_for_resting_tp_exit")
+    if price_increment <= ZERO:
+        blockers.append("price_increment_missing_for_resting_tp_exit")
+
+    limit_price = _quantize_down(take_profit_price, price_increment) if price_increment > ZERO else ZERO
+    if best_bid > ZERO and limit_price > ZERO and limit_price <= best_bid:
+        blockers.append("take_profit_price_at_or_below_current_bid_use_discretionary_close_instead")
+
+    requested_base = _quantize_down(available_base, increment) if increment > ZERO else available_base
+    if limit_price > ZERO and requested_base * limit_price > max_quote:
+        requested_base = _quantize_down(max_quote / limit_price, increment) if increment > ZERO else max_quote / limit_price
+        warnings.append("resting_tp_base_clamped_to_phase_d3_max_quote")
+    estimated_quote = requested_base * limit_price if limit_price > ZERO else ZERO
+    quote_policy = validate_exit_quote_size(
+        estimated_quote=estimated_quote,
+        cfg=cfg,
+        label=label,
+        is_full_close=True,
+        product_min_quote=min_quote,
+    )
+    blockers.extend(quote_policy["blockers"])
+    warnings.extend(quote_policy["warnings"])
+    if requested_base <= ZERO:
+        blockers.append("sell_base_missing_or_zero_after_reservation_or_increment")
+    if _has_duplicate_exit_for_label(order_store, ticker=selected_ticker, position_id=position_id, label=label):
+        blockers.append("duplicate_exit_label_already_open_for_position")
+
+    cid = _client_order_id(ticker=selected_ticker, position_id=position_id, label=label)
+    return _json_safe({
+        "generated_at": _now_iso(),
+        "phase": D3_PHASE,
+        "intent_id": cid,
+        "client_order_id": cid,
+        "ticker": selected_ticker,
+        "position_id": position_id,
+        "side": "SELL",
+        "execution_action": "place_limit_sell",
+        "label": str(label or "TP1").upper(),
+        "size_base": str(requested_base),
+        "limit_price": str(limit_price),
+        "take_profit_price": str(take_profit_price),
+        "price_increment_used": str(price_increment),
+        "estimated_quote_value": str(estimated_quote),
+        "requested_base_before_clamp": str(available_base),
+        "position_base": str(position_base),
+        "reserved_base_existing_exit_orders": str(reserved_base),
+        "available_base_after_reservations": str(available_base),
+        "reduce_only_local": True,
+        "post_only": bool(getattr(cfg, "phase_d3_exit_order_post_only", True)),
+        "blockers": sorted(set(blockers)),
+        "warnings": warnings,
+        "live_order_size_policy": live_order_size_policy_report(cfg),
+        "exit_quote_policy": quote_policy,
+        "source_plan_id": str(source_reason or "strategy_engine_proactive_take_profit_resting_order"),
+        "source_plan_status": D2_PLAN_STATUS_READY,
+        "resting_tp_semantics": {
+            "pricing_reference": "position_take_profit_price",
+            "best_bid": str(best_bid),
+            "market_order_allowed": False,
+            "purpose": "rest_ahead_of_time_so_a_fast_move_through_target_fills_between_cycles",
         },
     })
 
@@ -476,7 +605,13 @@ def select_next_phase_d3_exit_intent(
     position_base = _position_base(position)
     reserved_base = _reserved_base_for_position(order_store, ticker=ticker, position_id=position_id)
     available_base = max(ZERO, position_base - reserved_base)
-    max_quote = min(_cfg_dec(cfg, "phase_d3_max_exit_order_quote", D3_MAX_EXIT_QUOTE), D3_MAX_EXIT_QUOTE)
+    # No longer hard-clamped to D3_MAX_EXIT_QUOTE: exits scale with
+    # portfolio_value_usdc the same way entries do (see
+    # strategy_engine._apply_portfolio_based_entry_sizing), so re-clamping to
+    # the legacy fixed 120.00 here would silently truncate a full-close on any
+    # position sized above the old fixed band. D3_MAX_EXIT_QUOTE remains the
+    # fallback default only for a cfg with no override.
+    max_quote = _cfg_dec(cfg, "phase_d3_max_exit_order_quote", D3_MAX_EXIT_QUOTE)
     increment = _base_increment(exchange_rules)
     min_quote = max(_min_order_quote(exchange_rules), _cfg_dec(cfg, "min_live_order_quote_usdc", Decimal("20.00")))
     price_increment = _price_increment(exchange_rules)
@@ -670,7 +805,13 @@ def assess_phase_d3_exit_readiness(
     sell_base = _to_decimal(exit_intent.get("size_base"), "0")
     limit_price = _to_decimal(exit_intent.get("limit_price"), "0")
     estimated_quote = sell_base * limit_price if sell_base > ZERO and limit_price > ZERO else ZERO
-    max_quote = min(_cfg_dec(cfg, "phase_d3_max_exit_order_quote", D3_MAX_EXIT_QUOTE), D3_MAX_EXIT_QUOTE)
+    # No longer hard-clamped to D3_MAX_EXIT_QUOTE: exits scale with
+    # portfolio_value_usdc the same way entries do (see
+    # strategy_engine._apply_portfolio_based_entry_sizing), so re-clamping to
+    # the legacy fixed 120.00 here would silently truncate a full-close on any
+    # position sized above the old fixed band. D3_MAX_EXIT_QUOTE remains the
+    # fallback default only for a cfg with no override.
+    max_quote = _cfg_dec(cfg, "phase_d3_max_exit_order_quote", D3_MAX_EXIT_QUOTE)
     max_open = min(_cfg_int(cfg, "phase_d3_max_open_exit_orders", D3_MAX_OPEN_EXIT_ORDERS), D3_MAX_OPEN_EXIT_ORDERS)
     max_new = min(_cfg_int(cfg, "phase_d3_max_new_exit_orders_per_cycle", D3_MAX_NEW_EXIT_ORDERS_PER_CYCLE), D3_MAX_NEW_EXIT_ORDERS_PER_CYCLE)
     position_id = str(exit_intent.get("position_id") or plan.get("position_id") or _position_id(position) or "")

@@ -216,13 +216,29 @@ def _learning_context(row: Mapping[str, Any]) -> Dict[str, Any]:
     return sanitize_learning_context_snapshot(_as_dict(row.get("growbot_river_learning_context")))
 
 
+_STATE_KEY_RAW_ALIASES: Dict[str, Tuple[str, ...]] = {
+    # decision_outcome_tracker.py's compact logs/decision_outcomes.jsonl
+    # records carry these directly at top level (no growbot_river_learning_context
+    # wrapper), under the tracker's own field names rather than the canonical
+    # mfe_pct/mae_pct contract keys.
+    "mfe_pct": ("max_favorable_pct", "max_favorable_excursion_pct"),
+    "mae_pct": ("max_adverse_pct", "max_adverse_excursion_pct"),
+}
+
+
 def _state(row: Mapping[str, Any], *, learning_context: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
     learning_context = learning_context if learning_context is not None else _learning_context(row)
     features = _as_dict(learning_context.get("state")) or _as_dict(row.get("feature_pack")) or _as_dict(row.get("features"))
+    path_metrics = _as_dict(_as_dict(row.get("outcome")).get("path_metrics"))
     market = _as_dict(row.get("market_snapshot"))
     state: Dict[str, Any] = {}
     for key in ALLOWED_STATE_KEYS:
         value = features.get(key, row.get(key))
+        if value in (None, ""):
+            for alias in _STATE_KEY_RAW_ALIASES.get(key, ()):
+                value = row.get(alias, path_metrics.get(alias))
+                if value not in (None, ""):
+                    break
         if value not in (None, ""):
             state[key] = value
     if market:
@@ -293,6 +309,50 @@ _BAD_OUTCOME_STATE_HINTS: Tuple[Tuple[str, str, float, str, str, str], ...] = (
     ("liquidity_score", "lt", 0.50, "ORDERBOOK_LIQUIDITY_MIN_SCORE", "tighten", "low_liquidity_preceded_bad_outcome"),
 )
 
+# `classify_decision_outcome` (bot/decision_outcome_tracker.py) labels any
+# stop-touched approved_entry/prepared_plan episode "false_positive_plan",
+# regardless of what price did afterward -- it never lands in _BAD_LABELS, so
+# without this dedicated rule STOP_DISTANCE_PCT never sees "loosen" evidence
+# from the largest available data source. `mfe_pct` (max favorable excursion
+# in the same decision window) is already a real, allowlisted state field
+# (bot/reflection_learning_context.py::evaluate_decision_window); a stop that
+# was touched while the window still moved favorably by >=1% is evidence the
+# stop was tighter than the setup needed.
+_STOP_TOO_TIGHT_LABELS = {"false_positive_plan"}
+_STOP_TOO_TIGHT_STATE_HINTS: Tuple[Tuple[str, str, float, str, str, str], ...] = (
+    ("mfe_pct", "ge", 0.01, "STOP_DISTANCE_PCT", "loosen", "stop_touched_but_favorable_move_still_occurred_in_window"),
+)
+
+# No trailing-specific evidence existed at all before this: `exit_efficiency_proxy`
+# (bot/decision_outcome_tracker.py::compute_path_metrics, final_change_pct / mfe)
+# is already computed for every resolved decision but was never surfaced past
+# _compact_outcome() or read into the GrowBot/River state contract. A
+# genuinely favorable episode (label == "plan_follow_through") whose price
+# still moved favorably (mfe_pct) but had mostly reverted by the end of the
+# decision window (a low exit_efficiency_proxy) is evidence that a live
+# trailing stop would have locked in more of that move -- i.e. the trailing
+# distance is wider than the setup needed. This does not distinguish "trigger
+# too high" from "distance too wide" (both would show the same signature
+# here), so it only targets the distance parameter, which this data can
+# support without overreaching.
+_TRAILING_TOO_LOOSE_LABELS = {"plan_follow_through"}
+_TRAILING_TOO_LOOSE_MIN_MFE_PCT = 0.01
+_TRAILING_TOO_LOOSE_MAX_EXIT_EFFICIENCY = 0.3
+
+
+def _trailing_too_loose_hint(state: Mapping[str, Any]) -> List[Dict[str, str]]:
+    mfe = _as_float(state.get("mfe_pct"), default=float("nan"))
+    efficiency = _as_float(state.get("exit_efficiency_proxy"), default=float("nan"))
+    if mfe != mfe or efficiency != efficiency:
+        return []
+    if mfe >= _TRAILING_TOO_LOOSE_MIN_MFE_PCT and efficiency <= _TRAILING_TOO_LOOSE_MAX_EXIT_EFFICIENCY:
+        return [{
+            "parameter": "PHASE_D2_DEFAULT_TRAILING_DISTANCE_PCT",
+            "direction": "tighten",
+            "reason": "favorable_move_mostly_given_back_before_window_end",
+        }]
+    return []
+
 
 def _threshold_hit(state: Mapping[str, Any], key: str, comparator: str, threshold: Any) -> bool:
     value = _as_float(state.get(key), default=float("nan"))
@@ -343,6 +403,10 @@ def _parameter_hints(label: str, row: Mapping[str, Any], state: Mapping[str, Any
             {"parameter": "PHASE_D2_MIN_REWARD_TO_RISK_RATIO", "direction": "tighten", "reason": "adverse_or_bad_entry"},
         ])
         hints.extend(_state_threshold_hints(state, _BAD_OUTCOME_STATE_HINTS))
+    if label in _STOP_TOO_TIGHT_LABELS:
+        hints.extend(_state_threshold_hints(state, _STOP_TOO_TIGHT_STATE_HINTS))
+    if label in _TRAILING_TOO_LOOSE_LABELS:
+        hints.extend(_trailing_too_loose_hint(state))
     # Deduplicate by (parameter, direction): a single episode must not inflate
     # one parameter's evidence count just because several rules fired for it.
     deduped: Dict[Tuple[str, str], Dict[str, str]] = {}

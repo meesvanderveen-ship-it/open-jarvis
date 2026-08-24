@@ -90,3 +90,19 @@ export function usePipelineHealth() {
     refetchInterval: 15_000,
   })
 }
+
+export type TrackedTickers = {
+  allowed_tickers: string[]
+}
+
+// Sourced from state/runtime_ticker_universe.json, written by the actually
+// running bot process at startup -- reflects what that process has loaded in
+// memory right now, not a fresh re-read of .env (which could differ if .env
+// changed since the last restart).
+export function useTrackedTickers() {
+  return useQuery({
+    queryKey: ['status-tickers'],
+    queryFn: async () => (await apiClient.get<TrackedTickers>('/status/tickers')).data,
+    refetchInterval: 30_000,
+  })
+}

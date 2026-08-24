@@ -587,6 +587,7 @@ def _compact_outcome(record: Dict[str, Any]) -> Dict[str, Any]:
         "price_change_pct": outcome.get("price_change_pct"),
         "max_favorable_pct": (outcome.get("path_metrics") or {}).get("max_favorable_pct"),
         "max_adverse_pct": (outcome.get("path_metrics") or {}).get("max_adverse_pct"),
+        "exit_efficiency_proxy": (outcome.get("path_metrics") or {}).get("exit_efficiency_proxy"),
         "growbot_river_learning_context": record.get("growbot_river_learning_context"),
     }
 

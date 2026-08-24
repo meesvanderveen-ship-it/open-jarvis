@@ -1,10 +1,9 @@
 # Runtime credentials and local operational state
-#
-# De mappen hieronder staan met een leidende slash zodat ze alleen de
-# runtime-uitvoer in de projectroot negeren. Zonder die slash matcht git op
-# elke diepte, waardoor eerder onbedoeld frontend-broncode werd genegeerd
-# (dashboard/frontend/src/features/reports, .../features/logs en
-# .../components/layout/data verdwenen daardoor uit de repository).
+# Anchored to repo root (leading slash) -- unanchored patterns here
+# previously also matched same-named directories nested elsewhere (e.g.
+# dashboard/frontend/src/features/{logs,reports} and
+# dashboard/frontend/src/components/layout/data), silently keeping those
+# entire frontend features out of version control.
 .env
 .env.*
 !.env.example

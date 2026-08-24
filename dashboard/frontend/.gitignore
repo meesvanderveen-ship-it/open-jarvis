@@ -1,6 +1,6 @@
 # Logs
-# Verankerd op deze map: een kaal `logs` matcht ook
-# src/features/logs/, waardoor die broncode uit de repository verdween.
+# Anchored to this directory's root -- the unanchored form also matched
+# src/features/logs, silently keeping that whole feature out of git.
 /logs
 *.log
 npm-debug.log*

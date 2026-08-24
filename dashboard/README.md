@@ -157,18 +157,28 @@ feature):**
 
 | Screen | Source |
 |---|---|
-| Overview | `tools/show_autonomous_live_run_status.py --json`, `tools/show_full_pipeline_health.py --json` |
+| Overview | `tools/show_autonomous_live_run_status.py --json`, `tools/show_full_pipeline_health.py --json`, `state/runtime_ticker_universe.json` (tracked-ticker badges) |
 | Learning Cockpit | `tools/show_growbot_river_learning_status.py --json`, plus the adaptive learning intelligence layer (`GET /api/learning/intelligence` -> `bot/adaptive_learning_intelligence.py`; see [`docs/ADAPTIVE_LEARNING.md`](../docs/ADAPTIVE_LEARNING.md)) |
 | Parameter Proposals | same learning-status tool (`top_proposals`/`per_parameter_diagnostics`) + `approved_parameter_profile` (via the live-status tool); proposal-tier funnel via `GET /api/parameters/proposal-funnel` |
 | Opportunity Radar | `state/decision_outcomes.json` (latest record per ticker) |
 | Agent Trace | `state/decision_outcomes.json`, `state/positions.json`, `state/open_orders.json`, `state/trade_reflections.jsonl` |
 | Positions & Orders | `state/positions.json`, `state/open_orders.json`, `tools/show_open_orders.py --json --summary` |
+| Trade Thesis | `state/positions.json`, `logs/analysis.jsonl` (tailed), `state/open_orders.json` |
 | Risk & Safety | derived checklist from the two status tools above |
 | Logs & Evidence | `logs/*.jsonl` (tailed, never fully loaded) |
 | Reports & Audits | `reports/**/*.{json,md}` (depth-capped, size-capped) |
 | Simulation Lab | Parameter Proposals + `reports/adaptive_policy/adaptive-policy-lab-latest.json` + `reports/backtests/` |
 | Manual Approval | live status + pipeline health + parameter proposals (status display only) |
 | Prompt templates (in Agent Trace) | static AST-parsed inventory of `bot/prompts.py` |
+
+Positions, Opportunity Radar and Trade Thesis filter out **closed/historical**
+entries for tickers not in `state/runtime_ticker_universe.json` (written by
+`run_trader_loop.py` at startup from its own `ALLOWED_TICKERS`/
+`PHASE_C_ALLOWED_TICKERS`) — so narrowing the bot's ticker list doesn't leave
+stale tickers cluttering these views. An **open** position is never hidden
+this way, regardless of the current ticker list, since it still needs
+monitoring/exit. If the state file is missing (bot never ran, or predates
+this feature), filtering fails open and shows everything.
 
 ## Security notes
 

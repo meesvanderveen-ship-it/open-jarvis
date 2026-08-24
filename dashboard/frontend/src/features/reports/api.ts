@@ -1,19 +1,14 @@
 import { useQuery } from '@tanstack/react-query'
 import { apiClient } from '@/lib/api-client'
 
-// Vorm volgt dashboard/backend/services/reports.py (list_reports / get_report).
-export type ReportSummary = {
+export type ReportEntry = {
   id: string
-  name: string
   category: string
+  name: string
   extension: string
   size_bytes: number
   modified_at: number
   is_latest: boolean
-}
-
-export type ReportListResponse = {
-  reports: ReportSummary[]
 }
 
 export type ReportDetail = {
@@ -27,26 +22,16 @@ export type ReportDetail = {
 
 export function useReportList(category?: string) {
   return useQuery({
-    queryKey: ['reports', category ?? 'all'],
-    queryFn: async (): Promise<ReportListResponse> => {
-      const { data } = await apiClient.get<ReportListResponse>('/reports', {
-        params: category ? { category } : undefined,
-      })
-      return data
-    },
+    queryKey: ['reports', category],
+    queryFn: async () =>
+      (await apiClient.get<{ reports: ReportEntry[] }>('/reports', { params: { category } })).data,
   })
 }
 
-export function useReportDetail(reportId: string | null) {
+export function useReportDetail(id: string | null) {
   return useQuery({
-    queryKey: ['report', reportId],
-    enabled: Boolean(reportId),
-    queryFn: async (): Promise<ReportDetail> => {
-      const { data } = await apiClient.get<ReportDetail>(`/reports/${reportId}`)
-      return data
-    },
-    // Een ontbrekend rapport is een normale toestand (nog niet gegenereerd),
-    // geen fout om eindeloos opnieuw voor te proberen.
-    retry: false,
+    queryKey: ['report-detail', id],
+    queryFn: async () => (await apiClient.get<ReportDetail>(`/reports/${id}`)).data,
+    enabled: !!id,
   })
 }

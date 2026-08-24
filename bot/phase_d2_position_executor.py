@@ -23,6 +23,39 @@ D2_DEFAULT_PLANS_PATH = Path("state/phase_d2_position_executor_plans.json")
 D2_DEFAULT_AUDIT_PATH = Path("logs/phase_d2_position_executor.jsonl")
 
 
+def build_d2_exit_market_context(ticker: str, *, coinbase_client: Any = None) -> Dict[str, Any]:
+    """Live 1h support/resistance for exit_target_source_policy's market-based
+    target sources, so D.2 can pick a real target instead of always falling
+    back to the static position.take_profit_price (a fixed R-multiple set at
+    entry, not derived from market structure).
+
+    Deferred import to avoid a module-load-time dependency on pandas/candles
+    for every phase_d2 caller (most just want the pure fee-edge math). Any
+    failure (no client, network, missing candles) degrades to {} -- the exact
+    same fallback behaviour as before this function existed.
+    """
+    if coinbase_client is None:
+        return {}
+    try:
+        from bot.market_data import MarketDataService
+
+        feature_pack = MarketDataService(coinbase_client).build_feature_pack(ticker)
+        structure = feature_pack.get("structure") if isinstance(feature_pack, dict) else None
+        if not isinstance(structure, dict):
+            return {}
+        resistance = structure.get("nearest_resistance")
+        support = structure.get("nearest_support")
+        if resistance is None and support is None:
+            return {}
+        return {
+            "nearest_resistance": resistance,
+            "nearest_support": support,
+            "market_structure": {"resistance_level": resistance, "support_level": support},
+        }
+    except Exception:
+        return {}
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
