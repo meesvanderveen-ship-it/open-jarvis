@@ -37,12 +37,35 @@ if not "%PREFLIGHT%"=="0" (
     echo ------------------------------------------------------------
     echo   JARVIS is nog niet startklaar.
     echo   Hierboven staat wat er mist.
-    echo.
-    echo   Herstel dit met:  INSTALLEREN-WINDOWS.bat
     echo ------------------------------------------------------------
     echo.
-    pause
-    exit /b 1
+    REM Meteen hier aanbieden in plaats van doorverwijzen naar een ander
+    REM bestand: de sleutels invullen is precies wat er nu moet gebeuren,
+    REM en dat is dezelfde wizard die INSTALLEREN-WINDOWS.bat zou starten.
+    choice /c JN /n /m "Sleutels nu invullen? [J/N] "
+    if errorlevel 2 (
+        echo.
+        echo   Goed. Start dit bestand opnieuw zodra de sleutels klaar zijn.
+        echo.
+        pause
+        exit /b 1
+    )
+    echo.
+    "%VENV_PY%" -m tools.setup_wizard
+    echo.
+    echo Sleutels opnieuw controleren...
+    echo.
+    "%VENV_PY%" -m tools.setup_wizard --check
+    set "PREFLIGHT=%errorlevel%"
+    if not "!PREFLIGHT!"=="0" (
+        echo.
+        echo ------------------------------------------------------------
+        echo   Nog steeds niet startklaar. Hierboven staat waarom.
+        echo ------------------------------------------------------------
+        echo.
+        pause
+        exit /b 1
+    )
 )
 
 echo.
