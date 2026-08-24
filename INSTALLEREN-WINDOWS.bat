@@ -194,10 +194,11 @@ echo.
 echo   De OpenAI-sleutel plak je met een rechtermuisklik. Je ziet
 echo   sterretjes verschijnen; de sleutel zelf blijft onzichtbaar.
 echo.
-echo   Voor Coinbase wordt om het JSON-BESTAND gevraagd. Sleep dat
-echo   bestand in dit venster of plak het pad. Dat is betrouwbaarder
-echo   dan de sleutel plakken: een privateKey staat op meerdere
-echo   regels en overleeft plakken in een consolevenster niet.
+echo   Voor Coinbase wordt het JSON-BESTAND gebruikt. Staat dat in je
+echo   map Downloads, dan vindt de wizard het zelf en hoef je alleen
+echo   het nummer te typen. Anders sleep je het bestand in dit venster.
+echo   Dat is betrouwbaarder dan de sleutel plakken: een privateKey
+echo   staat op meerdere regels en overleeft plakken niet.
 echo.
 pause
 echo.

@@ -809,3 +809,130 @@ def test_truncated_pem_paste_is_recognised():
     assert _looks_like_truncated_pem("-----BEGIN EC PRIVATE KEY-----")
     assert not _looks_like_truncated_pem(ecdsa_pem())
     assert not _looks_like_truncated_pem("base64-ed25519-sleutel-zonder-pem")
+
+
+# ---------------------------------------------------------------------------
+# Sleutelbestand vinden zonder een pad te hoeven typen
+# ---------------------------------------------------------------------------
+
+
+def _write_key_file(path: Path) -> str:
+    pem = ecdsa_pem()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"name": "organizations/o/apiKeys/k", "privateKey": pem}))
+    return pem
+
+
+def test_key_files_are_found_in_the_usual_download_locations(tmp_path, monkeypatch):
+    """Een pad intypen was het grootste struikelblok van de setup."""
+    from tools import setup_wizard
+
+    home = tmp_path / "home"
+    _write_key_file(home / "Downloads" / "cdp_api_key.json")
+    _write_key_file(home / "Desktop" / "andere_sleutel.json")
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
+
+    namen = {path.name for path in setup_wizard.find_coinbase_key_files()}
+
+    assert {"cdp_api_key.json", "andere_sleutel.json"} <= namen
+
+
+def test_unrelated_json_is_not_offered_as_a_key_file(tmp_path, monkeypatch):
+    """Een projectmap staat vol JSON; alleen echte sleutelbestanden tellen."""
+    from tools import setup_wizard
+
+    home = tmp_path / "home"
+    downloads = home / "Downloads"
+    downloads.mkdir(parents=True)
+    (downloads / "package-lock.json").write_text(
+        json.dumps({"name": "app", "lockfileVersion": 3})
+    )
+    (downloads / "willekeurig.json").write_text(json.dumps({"foo": "bar"}))
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
+
+    assert setup_wizard.find_coinbase_key_files() == []
+
+
+def test_a_found_key_file_can_be_chosen_by_number(tmp_path, monkeypatch):
+    from tools import setup_wizard
+
+    home = tmp_path / "home"
+    pem = _write_key_file(home / "Downloads" / "cdp_api_key.json")
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
+
+    name, secret = setup_wizard._prompt_coinbase_from_file(reader=lambda _: "1")
+
+    assert name == "organizations/o/apiKeys/k"
+    assert secret == pem.strip()
+
+
+def test_out_of_range_number_reprompts_instead_of_crashing(tmp_path, monkeypatch):
+    from tools import setup_wizard
+
+    home = tmp_path / "home"
+    _write_key_file(home / "Downloads" / "cdp_api_key.json")
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
+
+    antwoorden = iter(["9", "1"])
+    name, _ = setup_wizard._prompt_coinbase_from_file(reader=lambda _: next(antwoorden))
+
+    assert name == "organizations/o/apiKeys/k"
+
+
+def test_enter_falls_back_to_pasting_the_values(tmp_path, monkeypatch):
+    from tools import setup_wizard
+
+    home = tmp_path / "home"
+    _write_key_file(home / "Downloads" / "cdp_api_key.json")
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
+
+    assert setup_wizard._prompt_coinbase_from_file(reader=lambda _: "") is None
+
+
+def test_swapped_key_and_secret_from_the_old_paste_bug_is_flagged(capsys):
+    """De oude bug kon de API Key in het Secret-veld laten belanden."""
+    from tools import setup_wizard
+
+    setup_wizard._describe_stored_coinbase(
+        {
+            "COINBASE_API_KEY": "organizations/o/apiKeys/k",
+            "COINBASE_API_SECRET": "organizations/o/apiKeys/k",
+        }
+    )
+    uitvoer = capsys.readouterr().out
+
+    assert "verwisseling" in uitvoer
+
+
+def test_stored_openai_key_without_sk_prefix_is_flagged(capsys):
+    """"is al ingesteld (104 tekens)" leest als goedkeuring, maar telt alleen."""
+    from tools import setup_wizard
+
+    setup_wizard._warn_if_openai_key_shape_is_odd("a" * 104)
+    assert "begint niet met 'sk-'" in capsys.readouterr().out
+
+    setup_wizard._warn_if_openai_key_shape_is_odd("sk-proj-" + "a" * 96)
+    assert capsys.readouterr().out == ""
+
+
+def test_full_wizard_needs_only_enter_and_a_number(tmp_path, monkeypatch):
+    """De hele setup in twee toetsaanslagen, met een intacte PEM als resultaat."""
+    from tools import setup_wizard
+
+    home = tmp_path / "home"
+    pem = _write_key_file(home / "Downloads" / "cdp_api_key.json")
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
+
+    target = tmp_path / ".env"
+    target.write_text("OPENAI_API_KEY=sk-proj-" + "a" * 90 + "\n")
+    monkeypatch.setattr(setup_wizard.env_file, "env_path", lambda: target)
+
+    code = setup_wizard.run_interactive(
+        reader=lambda _: "",       # Enter: OpenAI-sleutel behouden
+        line_reader=lambda _: "1",  # het gevonden sleutelbestand
+    )
+
+    assert code == 0
+    values = env_file.read_env(target)
+    assert values["COINBASE_API_SECRET"].replace("\\n", "\n") == pem.strip()
+    assert values["OPENAI_API_KEY"].startswith("sk-proj-")

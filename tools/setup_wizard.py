@@ -193,6 +193,27 @@ def _clean_path_input(raw: str) -> str:
     return raw.strip().strip('"').strip("'").strip()
 
 
+def _warn_if_openai_key_shape_is_odd(current: str) -> None:
+    """Waarschuw als een opgeslagen OpenAI-sleutel niet op een sleutel lijkt.
+
+    "is al ingesteld (104 tekens)" leest als goedkeuring, terwijl er alleen
+    geteld is. Elke OpenAI API key begint met `sk-`; ontbreekt dat, dan is de
+    waarde vrijwel zeker beschadigd -- bijvoorbeeld door een plakactie die
+    halverwege werd afgekapt. Dit blijft een waarschuwing en geen weigering:
+    alleen OpenAI zelf kan een sleutel definitief afkeuren, en dat gebeurt in
+    stap 7 van de installatie.
+    """
+    if not current or is_placeholder(current):
+        return
+    if current.startswith("sk-"):
+        return
+    print(
+        f"  Let op: de opgeslagen {OPENAI_KEY_ENV} begint niet met 'sk-'.\n"
+        "  Dat wijst op een beschadigde of onvolledige waarde. Plak hem\n"
+        "  hieronder opnieuw in plaats van Enter te drukken."
+    )
+
+
 def _prompt_secret(
     label: str,
     env_key: str,
@@ -293,20 +314,123 @@ def _looks_like_truncated_pem(value: str) -> bool:
     return "\n" not in value and "\\n" not in value
 
 
+_MAX_KEY_FILE_BYTES = 64 * 1024
+
+
+def _search_directories() -> list[Path]:
+    """Mappen waar een gedownload sleutelbestand redelijkerwijs staat."""
+    home = Path.home()
+    candidates = [
+        env_file.project_root(),
+        home / "Downloads",
+        home / "Downloads" / "Coinbase",
+        home / "Desktop",
+        home / "OneDrive" / "Downloads",
+        home / "OneDrive" / "Bureaublad",
+        home / "OneDrive" / "Desktop",
+        home,
+    ]
+    seen: set[Path] = set()
+    unique: list[Path] = []
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            continue
+        if resolved in seen or not resolved.is_dir():
+            continue
+        seen.add(resolved)
+        unique.append(resolved)
+    return unique
+
+
+def find_coinbase_key_files(limit: int = 8) -> list[Path]:
+    """Zoek gedownloade CDP-sleutelbestanden op de gebruikelijke plekken.
+
+    Een pad intypen is de grootste struikelblok van de hele setup: het bestand
+    staat vrijwel altijd in Downloads, maar de gebruiker moet het dan wel zien
+    te vinden. Alleen bestanden die echt een 'name' en een 'privateKey'
+    bevatten tellen mee, zodat er geen willekeurige JSON in de lijst belandt.
+
+    Nieuwste bestand eerst: wie net een sleutel aanmaakte, wil die.
+    """
+    found: list[tuple[float, Path]] = []
+    for directory in _search_directories():
+        try:
+            entries = list(directory.glob("*.json"))
+        except OSError:
+            continue
+        for entry in entries:
+            try:
+                if not entry.is_file() or entry.stat().st_size > _MAX_KEY_FILE_BYTES:
+                    continue
+                load_coinbase_key_file(entry)
+            except (OSError, ValueError):
+                continue
+            found.append((entry.stat().st_mtime, entry))
+
+    found.sort(key=lambda item: item[0], reverse=True)
+    return [path for _, path in found[:limit]]
+
+
+def _describe_stored_coinbase(existing: dict[str, str]) -> None:
+    """Laat zien wat er al opgeslagen staat, zoals OpenAI dat ook doet.
+
+    Zonder dit springt de wizard meteen naar een padvraag en is niet te zien
+    of er iets te doen valt. En de oude plak-bug kon de API Key in het
+    Secret-veld laten belanden; die verwisseling is hier zichtbaar.
+    """
+    key = existing.get(COINBASE_KEY_ENV, "")
+    secret = existing.get(COINBASE_SECRET_ENV, "")
+
+    for env_key, value in ((COINBASE_KEY_ENV, key), (COINBASE_SECRET_ENV, secret)):
+        if not value or is_placeholder(value):
+            print(f"  {env_key} ontbreekt nog.")
+        else:
+            print(f"  {env_key} is al ingesteld ({len(value)} tekens).")
+
+    if secret and not is_placeholder(secret) and secret.startswith("organizations/"):
+        print(
+            f"  Let op: {COINBASE_SECRET_ENV} bevat een sleutelnaam in plaats van een\n"
+            "  privateKey. Dat is een verwisseling; hieronder wordt hij overschreven."
+        )
+
+
 def _prompt_coinbase_from_file(
-    *, reader: Callable[[str], str] = read_line
+    *,
+    existing: Optional[dict[str, str]] = None,
+    reader: Callable[[str], str] = read_line,
 ) -> Optional[tuple[str, str]]:
-    """Vraag om het pad naar het CDP-sleutelbestand. None = handmatig plakken."""
-    print("\n  Aanbevolen: wijs het JSON-bestand aan dat Coinbase je liet")
-    print("  downloaden. Sleep het bestand in dit venster of plak het pad.")
-    print("  Enter = de twee waarden liever zelf plakken.")
+    """Kies het CDP-sleutelbestand. None = de waarden liever zelf plakken."""
+    if existing is not None:
+        _describe_stored_coinbase(existing)
+
+    gevonden = find_coinbase_key_files()
+
+    print("\n  Aanbevolen: gebruik het JSON-bestand dat Coinbase je liet downloaden.")
+    if gevonden:
+        print("  Deze sleutelbestanden staan al op deze pc (nieuwste eerst):")
+        for number, path in enumerate(gevonden, start=1):
+            print(f"    {number}) {path}")
+        vraag = "  Nummer, of sleep het bestand hierheen [Enter = zelf plakken]: "
+    else:
+        print("  Sleep het bestand in dit venster of plak het pad.")
+        vraag = "  Pad naar het JSON-bestand [Enter = zelf plakken]: "
 
     while True:
-        raw = _clean_path_input(reader("  Pad naar het JSON-bestand: "))
+        raw = _clean_path_input(reader(vraag))
         if not raw:
             return None
 
-        path = Path(raw).expanduser()
+        if raw.isdigit() and gevonden:
+            index = int(raw)
+            if not 1 <= index <= len(gevonden):
+                print(f"    Kies een nummer tussen 1 en {len(gevonden)}.")
+                continue
+            path = gevonden[index - 1]
+        else:
+            path = Path(raw).expanduser()
+
         if not path.is_file():
             print(f"    Niet gevonden: {path}")
             print("    Probeer opnieuw, of druk op Enter om zelf te plakken.")
@@ -324,7 +448,11 @@ def _prompt_coinbase_from_file(
         return name, secret
 
 
-def run_interactive(*, reader: Callable[[str], str] = read_secret) -> int:
+def run_interactive(
+    *,
+    reader: Callable[[str], str] = read_secret,
+    line_reader: Callable[[str], str] = read_line,
+) -> int:
     print("=" * 68)
     print("JARVIS — credential setup")
     print("=" * 68)
@@ -340,6 +468,7 @@ def run_interactive(*, reader: Callable[[str], str] = read_secret) -> int:
 
     print("\n--- OpenAI ---")
     print("  Je API key van https://platform.openai.com/api-keys")
+    _warn_if_openai_key_shape_is_odd(existing.get(OPENAI_KEY_ENV, ""))
     openai_key = _prompt_secret("OpenAI API Key", OPENAI_KEY_ENV, existing.get(OPENAI_KEY_ENV, ""), reader=reader)
     if openai_key:
         updates[OPENAI_KEY_ENV] = openai_key
@@ -351,7 +480,7 @@ def run_interactive(*, reader: Callable[[str], str] = read_secret) -> int:
     print("    - veld 'privateKey' -> Coinbase API Secret")
     print("  Beide sleuteltypes werken: ECDSA (PEM) en Ed25519 (base64).")
 
-    from_file = _prompt_coinbase_from_file()
+    from_file = _prompt_coinbase_from_file(existing=existing, reader=line_reader)
     if from_file is not None:
         updates[COINBASE_KEY_ENV], updates[COINBASE_SECRET_ENV] = from_file
     else:
