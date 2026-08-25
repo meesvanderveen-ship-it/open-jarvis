@@ -42,7 +42,7 @@ if not "%PREFLIGHT%"=="0" (
     REM Meteen hier aanbieden in plaats van doorverwijzen naar een ander
     REM bestand: de sleutels invullen is precies wat er nu moet gebeuren,
     REM en dat is dezelfde wizard die INSTALLEREN-WINDOWS.bat zou starten.
-    choice /c JN /n /m "Sleutels nu invullen? [J/N] "
+    choice /c JN /n /m "Services nu koppelen? [J/N] "
     if errorlevel 2 (
         echo.
         echo   Goed. Start dit bestand opnieuw zodra de sleutels klaar zijn.
@@ -51,7 +51,11 @@ if not "%PREFLIGHT%"=="0" (
         exit /b 1
     )
     echo.
-    "%VENV_PY%" -m tools.setup_wizard
+    REM Connection setup opent de officiele pagina's en pikt de credential
+    REM daarna zelf op. Lukt dat niet, dan vraagt hij hem alsnog gewoon --
+    REM dezelfde opslag- en validatielaag als tools.setup_wizard, dat als
+    REM handmatige route beschikbaar blijft.
+    "%VENV_PY%" -m tools.connect_services
     echo.
     echo Sleutels opnieuw controleren...
     echo.
