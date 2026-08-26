@@ -249,20 +249,37 @@ def _key_file_finder() -> Callable[[], list[Path]]:
     return find_coinbase_key_files
 
 
+def _fingerprint(path: Path) -> tuple:
+    """Identificeer een bestand op pad *en* inhoudskenmerken.
+
+    Alleen op pad vergelijken is niet genoeg: browsers schrijven een nieuwe
+    download vaak over hetzelfde `cdp_api_key.json` heen. Het pad blijft dan
+    gelijk terwijl de sleutel erin een andere is, en de download zou onzicht-
+    baar blijven. Wijzigingstijd en grootte erbij maken dat verschil wel
+    zichtbaar.
+    """
+    try:
+        stat = path.stat()
+    except OSError:
+        # Verdwenen tussen zoeken en meten; dan telt alleen het pad nog.
+        return (path, None, None)
+    return (path, stat.st_mtime_ns, stat.st_size)
+
+
 def snapshot_key_files(
     *, finder: Optional[Callable[[], list[Path]]] = None
-) -> set[Path]:
-    """De sleutelbestanden die er nu al staan.
+) -> set[tuple]:
+    """De sleutelbestanden die er nu al staan, met hun inhoudskenmerken.
 
     Vastleggen vóór het openen van de browser, zodat een bestand van een
     eerdere poging niet wordt aangezien voor de sleutel die nu wordt gemaakt.
     """
     find = finder or _key_file_finder()
-    return set(find())
+    return {_fingerprint(path) for path in find()}
 
 
 def wait_for_new_coinbase_key_file(
-    known: Iterable[Path],
+    known: Iterable,
     *,
     timeout: float = 300.0,
     poll_interval: float = 1.0,
@@ -270,12 +287,16 @@ def wait_for_new_coinbase_key_file(
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
 ) -> Optional[Path]:
-    """Wacht tot er een nieuw CDP-sleutelbestand verschijnt.
+    """Wacht tot er een nieuw of gewijzigd CDP-sleutelbestand verschijnt.
 
     De browser zet het bestand in Downloads; dat is het moment waarop JARVIS
     het kan overnemen. `find_coinbase_key_files` accepteert alleen JSON die
     echt een 'name' en een 'privateKey' bevat, dus een half binnengekomen
     download of een willekeurig ander JSON-bestand telt niet mee.
+
+    `known` bevat de kenmerken uit `snapshot_key_files`. Een download die over
+    een bestaand bestand heen wordt geschreven telt daardoor ook als nieuw --
+    zonder dat zou hergebruik van dezelfde bestandsnaam onopgemerkt blijven.
 
     Retourneert het pad, of None bij een timeout.
     """
@@ -284,7 +305,7 @@ def wait_for_new_coinbase_key_file(
     deadline = clock() + timeout
     while True:
         for candidate in find():
-            if candidate not in already:
+            if _fingerprint(candidate) not in already:
                 return candidate
         if clock() >= deadline:
             return None

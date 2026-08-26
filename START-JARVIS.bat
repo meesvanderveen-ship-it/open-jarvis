@@ -28,11 +28,27 @@ if not exist "dashboard\frontend\dist\index.html" (
 REM ===============================================================
 REM Preflight: geen enkel proces starten met kapotte credentials
 REM ===============================================================
+REM --online erbij: een ingetrokken sleutel heeft nog steeds een geldige
+REM vorm en komt door de offline controle heen. Dan zou de bot starten met
+REM credentials die Coinbase allang weigert, en werd de koppeling nooit
+REM aangeboden. Alleen een echte read-only aanroep sluit dat uit.
 echo Sleutels controleren...
 echo.
-"%VENV_PY%" -m tools.setup_wizard --check
+REM De wizard onderscheidt drie uitkomsten: 0 = goed en geverifieerd,
+REM 1 = ontbreekt of afgewezen, 2 = vorm klopt maar de API was onbereikbaar.
+REM Alleen 1 vraagt om nieuwe sleutels. Bij 2 is er niets mis met de
+REM credentials en zou een setup-dialoog de gebruiker op het verkeerde been
+REM zetten; dat wordt een waarschuwing en de bot start gewoon.
+"%VENV_PY%" -m tools.setup_wizard --check --online
 set "PREFLIGHT=%errorlevel%"
-if not "%PREFLIGHT%"=="0" (
+if "%PREFLIGHT%"=="2" (
+    echo.
+    echo   Let op: de sleutels konden niet bij de API gecontroleerd worden.
+    echo   Dat wijst op een netwerkprobleem, niet op verkeerde sleutels.
+    echo   JARVIS start door.
+    echo.
+)
+if "%PREFLIGHT%"=="1" (
     echo.
     echo ------------------------------------------------------------
     echo   JARVIS is nog niet startklaar.
@@ -59,9 +75,9 @@ if not "%PREFLIGHT%"=="0" (
     echo.
     echo Sleutels opnieuw controleren...
     echo.
-    "%VENV_PY%" -m tools.setup_wizard --check
+    "%VENV_PY%" -m tools.setup_wizard --check --online
     set "PREFLIGHT=%errorlevel%"
-    if not "!PREFLIGHT!"=="0" (
+    if "!PREFLIGHT!"=="1" (
         echo.
         echo ------------------------------------------------------------
         echo   Nog steeds niet startklaar. Hierboven staat waarom.

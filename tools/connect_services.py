@@ -209,38 +209,48 @@ def connect_coinbase(
         known, timeout=timeout, finder=finder, **wait_kwargs
     )
 
+    from tools.setup_wizard import load_coinbase_key_file
+
     if path is None:
+        # Geen verse download gezien. Dat is normaal bij het vervangen van een
+        # sleutel: het bestand staat er dan vaak al. De keuzelijst van de
+        # wizard toont wat er staat, met nummerkeuze, slepen en foutherstel.
         print(
-            "\n  Geen nieuw sleutelbestand gezien. Sleep het bestand hierheen\n"
-            "  of plak het pad, of laat leeg om over te slaan.",
+            "\n  Geen nieuwe download gezien. Kies het bestand zelf:",
             file=stream,
         )
-        typed = prompt("  Pad naar het JSON-bestand: ").strip().strip('"').strip("'")
-        if not typed:
+        from tools.setup_wizard import _prompt_coinbase_from_file
+
+        chosen = _prompt_coinbase_from_file(reader=prompt)
+        if chosen is None:
             return connect_services.ConnectOutcome(
                 provider="coinbase",
                 connected=False,
-                summary="Overgeslagen: geen sleutelbestand ontvangen.",
+                summary="Overgeslagen: geen sleutelbestand gekozen.",
+                detail=(
+                    "Gebruik `python -m tools.setup_wizard` om 'name' en "
+                    "'privateKey' met de hand in te voeren."
+                ),
             )
-        path = Path(typed)
-
-    from tools.setup_wizard import load_coinbase_key_file
-
-    try:
-        name, secret = load_coinbase_key_file(path)
-    except ValueError as exc:
-        # De melding van load_coinbase_key_file beschrijft het bestand, nooit
-        # de inhoud van de sleutel.
-        return connect_services.ConnectOutcome(
-            provider="coinbase",
-            connected=False,
-            summary="Sleutelbestand onbruikbaar.",
-            detail=str(exc),
-        )
+        name, secret = chosen
+        path = None
+    else:
+        try:
+            name, secret = load_coinbase_key_file(path)
+        except ValueError as exc:
+            # De melding van load_coinbase_key_file beschrijft het bestand,
+            # nooit de inhoud van de sleutel.
+            return connect_services.ConnectOutcome(
+                provider="coinbase",
+                connected=False,
+                summary="Sleutelbestand onbruikbaar.",
+                detail=str(exc),
+            )
 
     connect_services.store_coinbase_credentials(name, secret)
-    print(f"\n  Gevonden: {path.name}", file=stream)
-    print("  Opgeslagen. Valideren met een read-only accountopvraging...", file=stream)
+    if path is not None:
+        print(f"\n  Gevonden: {path.name}", file=stream)
+    print("\n  Opgeslagen. Valideren met een read-only accountopvraging...", file=stream)
 
     if verifier is None:
         from bot.credential_status import verify_coinbase as verifier  # type: ignore[assignment]
@@ -265,12 +275,18 @@ def run(
     stream=sys.stdout,
     online: bool = True,
     prompt: Callable[[str], str] = input,
+    reconnect: tuple[str, ...] = (),
     connect_openai_fn: Callable[..., connect_services.ConnectOutcome] = connect_openai,
     connect_coinbase_fn: Callable[..., connect_services.ConnectOutcome] = connect_coinbase,
 ) -> int:
     """Toon de status en koppel wat er nog niet staat.
 
     One-click gedrag: staat alles al goed, dan wordt er niets gevraagd.
+
+    `reconnect` bevat providers die hoe dan ook opnieuw gekoppeld worden, ook
+    als ze nu goed staan. Zonder die mogelijkheid is een sleutel niet te
+    vervangen: een ingetrokken sleutel die nog wel goed van vorm is komt door
+    de offline controle heen, en dan zou de koppeling nooit worden aangeboden.
     """
     _print_header(stream)
 
@@ -278,9 +294,15 @@ def run(
     checks = collect_checks(online=online)
     state = render_status(checks, stream)
 
-    if state == READY:
+    if state == READY and not reconnect:
         print(f"\n{_rule('-')}", file=stream)
         print("\n  Alles staat al gekoppeld. Geen setup nodig.", file=stream)
+        print(
+            "\n  Toch een sleutel vervangen? Draai:\n"
+            "    python -m tools.connect_services --reconnect coinbase\n"
+            "    python -m tools.connect_services --reconnect openai",
+            file=stream,
+        )
         print("\n  [ START JARVIS ]", file=stream)
         print(f"\n{_rule()}", file=stream)
         return 0
@@ -293,7 +315,7 @@ def run(
         ("coinbase", connect_coinbase_fn),
     ):
         check = by_provider.get(provider)
-        if check is not None and check.status == STATUS_OK:
+        if provider not in reconnect and check is not None and check.status == STATUS_OK:
             continue
         outcome = connector(stream=stream, prompt=prompt)
         mark = "●" if outcome.connected else "✕"
@@ -334,6 +356,17 @@ def main(argv: Optional[list[str]] = None) -> int:
         action="store_true",
         help="Geen API-validatie; alleen controleren wat er opgeslagen staat.",
     )
+    parser.add_argument(
+        "--reconnect",
+        action="append",
+        choices=["openai", "coinbase"],
+        default=[],
+        metavar="PROVIDER",
+        help=(
+            "Koppel deze provider opnieuw, ook als hij nu goed staat. "
+            "Meermaals te gebruiken. Nodig om een sleutel te vervangen."
+        ),
+    )
     args = parser.parse_args(argv)
 
     if args.status:
@@ -345,7 +378,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
         return exit_code_for(state)
 
-    return run(online=not args.offline)
+    return run(online=not args.offline, reconnect=tuple(args.reconnect))
 
 
 if __name__ == "__main__":

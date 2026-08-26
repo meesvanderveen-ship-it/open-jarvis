@@ -217,9 +217,10 @@ def test_new_download_is_detected_automatically(tmp_path):
     old = _write_key_file(tmp_path / "old.json", "oud", ECDSA_PRIVATE_KEY)
     new = _write_key_file(tmp_path / "new.json", VALID_COINBASE_KEY_NAME, ECDSA_PRIVATE_KEY)
 
+    known = connect_services.snapshot_key_files(finder=lambda: [old])
     results = iter([[old], [old], [old, new]])
     found = connect_services.wait_for_new_coinbase_key_file(
-        {old},
+        known,
         finder=lambda: next(results),
         clock=lambda: 0.0,
         sleep=lambda _: None,
@@ -230,16 +231,41 @@ def test_new_download_is_detected_automatically(tmp_path):
 
 def test_a_pre_existing_key_file_is_not_taken_as_the_new_download(tmp_path):
     old = _write_key_file(tmp_path / "old.json", "oud", ECDSA_PRIVATE_KEY)
+    known = connect_services.snapshot_key_files(finder=lambda: [old])
     ticks = iter([0.0, 0.0, 99.0])
 
     found = connect_services.wait_for_new_coinbase_key_file(
-        {old},
+        known,
         finder=lambda: [old],
         clock=lambda: next(ticks),
         sleep=lambda _: None,
         timeout=1.0,
     )
     assert found is None
+
+
+def test_a_download_overwriting_the_same_filename_is_still_detected(tmp_path):
+    """Browsers schrijven de nieuwe sleutel vaak over cdp_api_key.json heen.
+
+    Op alleen het pad vergelijken zou die download onzichtbaar maken: het pad
+    is ongewijzigd terwijl de sleutel erin een andere is.
+    """
+    target = _write_key_file(
+        tmp_path / "cdp_api_key.json", "organizations/o/apiKeys/OUD", ECDSA_PRIVATE_KEY
+    )
+    known = connect_services.snapshot_key_files(finder=lambda: [target])
+
+    # Zelfde bestandsnaam, nieuwe inhoud.
+    _write_key_file(target, "organizations/o/apiKeys/NIEUW", ed25519_base64())
+
+    found = connect_services.wait_for_new_coinbase_key_file(
+        known,
+        finder=lambda: [target],
+        clock=lambda: 0.0,
+        sleep=lambda _: None,
+        timeout=10.0,
+    )
+    assert found == target
 
 
 def test_download_wait_times_out_instead_of_hanging():
@@ -624,6 +650,84 @@ def test_missing_credentials_trigger_only_the_missing_provider(tmp_path, monkeyp
     )
 
     assert called == ["coinbase"]
+
+
+def test_reconnect_replaces_a_provider_that_is_already_connected(tmp_path, monkeypatch):
+    """Zonder deze route is een geldige sleutel niet te vervangen."""
+    from tools import connect_services as cli
+
+    target = tmp_path / ".env"
+    monkeypatch.setattr(env_file, "env_path", lambda: target)
+    monkeypatch.setattr(env_file, "example_path", lambda: tmp_path / ".env.example")
+
+    for name, value in (
+        (OPENAI_KEY_ENV, VALID_OPENAI_KEY),
+        (COINBASE_KEY_ENV, VALID_COINBASE_KEY_NAME),
+        (COINBASE_SECRET_ENV, ECDSA_PRIVATE_KEY),
+    ):
+        monkeypatch.setenv(name, value)
+
+    called: list[str] = []
+
+    def coinbase_connector(**kwargs):
+        called.append("coinbase")
+        return connect_services.ConnectOutcome(
+            provider="coinbase", connected=True, summary="Opnieuw gekoppeld."
+        )
+
+    def openai_connector(**kwargs):
+        raise AssertionError("alleen coinbase stond in reconnect")
+
+    stream = io.StringIO()
+    cli.run(
+        stream=stream,
+        online=False,
+        reconnect=("coinbase",),
+        connect_openai_fn=openai_connector,
+        connect_coinbase_fn=coinbase_connector,
+    )
+
+    assert called == ["coinbase"]
+
+
+def test_ready_screen_explains_how_to_replace_a_key(tmp_path, monkeypatch):
+    """Wie een sleutel wil vervangen moet kunnen zien hoe."""
+    from tools import connect_services as cli
+
+    monkeypatch.setattr(env_file, "env_path", lambda: tmp_path / ".env")
+    monkeypatch.setattr(env_file, "example_path", lambda: tmp_path / ".env.example")
+    for name, value in (
+        (OPENAI_KEY_ENV, VALID_OPENAI_KEY),
+        (COINBASE_KEY_ENV, VALID_COINBASE_KEY_NAME),
+        (COINBASE_SECRET_ENV, ECDSA_PRIVATE_KEY),
+    ):
+        monkeypatch.setenv(name, value)
+
+    stream = io.StringIO()
+    code = cli.run(
+        stream=stream,
+        online=False,
+        connect_openai_fn=lambda **k: pytest.fail("niets te koppelen"),
+        connect_coinbase_fn=lambda **k: pytest.fail("niets te koppelen"),
+    )
+
+    assert code == 0
+    assert "--reconnect coinbase" in stream.getvalue()
+
+
+def test_reconnect_flag_is_parsed_for_both_providers():
+    from tools import connect_services as cli
+
+    parsed = []
+    cli.run = lambda **kwargs: parsed.append(kwargs.get("reconnect")) or 0  # type: ignore[assignment]
+    try:
+        cli.main(["--reconnect", "coinbase", "--reconnect", "openai", "--offline"])
+    finally:
+        import importlib
+
+        importlib.reload(cli)
+
+    assert parsed == [("coinbase", "openai")]
 
 
 def test_status_screen_shows_not_connected_when_nothing_is_configured(monkeypatch):
