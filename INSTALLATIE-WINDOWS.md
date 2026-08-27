@@ -20,6 +20,11 @@ Drie dingen. Regel ze eerst, dan gaat de rest vanzelf.
 
 Ga naar **https://www.python.org/downloads/** en klik op de grote gele knop.
 
+> **Je hebt Python 3.12 of nieuwer nodig.** De pakketten die de bot gebruikt
+> (numpy, pandas) worden niet meer voor oudere versies uitgebracht. De
+> installatie controleert dit en stopt met een duidelijke melding als je
+> versie te oud is.
+
 > **Belangrijk:** zet tijdens het installeren onderin een vinkje bij
 > **"Add python.exe to PATH"**. Zonder dat vinkje werkt de installatie niet.
 > Zie je dat scherm al voorbij? Verwijder Python en installeer opnieuw.
@@ -31,12 +36,17 @@ Klik in de installer steeds op "Next" en daarna "Install".
 
 ### 3. Je twee sleutels
 
-**OpenAI:** ga naar https://platform.openai.com/api-keys, klik op
-"Create new secret key", en kopieer de sleutel meteen naar Kladblok. Je kunt
-hem later niet nog eens bekijken.
+Deze hoef je **niet vooraf** te regelen: de installatie opent de officiële
+pagina's zelf en pikt de sleutels daarna op. Wil je het toch van tevoren
+doen, dan is dit wat er gebeurt.
 
-**Coinbase:** maak in je Coinbase-account een CDP API key aan. Je downloadt
-dan een bestandje dat er zo uitziet:
+**OpenAI:** op https://platform.openai.com/api-keys maak je met
+"Create new secret key" een sleutel aan en druk je op de kopieerknop. JARVIS
+haalt hem van je klembord. OpenAI toont een sleutel maar één keer, dus die
+kopieerknop is sowieso de bedoelde handeling.
+
+**Coinbase:** in de CDP Portal maak je een API key aan **van het type
+ECDSA**. Je downloadt dan een bestandje dat er zo uitziet:
 
 ```json
 {
@@ -45,7 +55,9 @@ dan een bestandje dat er zo uitziet:
 }
 ```
 
-Bewaar dat bestand. Je hebt straks beide regels nodig.
+Laat dat bestand gewoon in je map Downloads staan. JARVIS ziet de download
+verschijnen en leest beide velden er zelf uit; openen of overtypen hoeft
+niet.
 
 > Geef de sleutel alleen **View**-rechten zolang je in paper mode test.
 > Deel deze twee sleutels met niemand. Wie ze heeft, kan bij je account.
@@ -66,21 +78,37 @@ alles vanzelf; dat duurt 5 tot 10 minuten.
 > **"Meer informatie"** en daarna op **"Toch uitvoeren"**. Dat komt doordat
 > het bestand niet van een bekende uitgever komt.
 
-### Je sleutels invoeren
+### Je sleutels koppelen
 
-Aan het eind vraagt het venster om je sleutels:
+Aan het eind opent JARVIS de officiële pagina's, één voor één:
 
-| Vraag | Wat je plakt |
+| Provider | Wat jij doet |
 |---|---|
-| OpenAI API Key | je sleutel van OpenAI |
-| Coinbase API Key | het stuk achter `"name"` |
-| Coinbase API Secret | het stuk achter `"privateKey"` |
+| OpenAI | key aanmaken, op de **kopieerknop** drukken |
+| Coinbase | key van het type **ECDSA** aanmaken en downloaden |
 
-Plakken doe je met een **rechtermuisklik** in het zwarte venster. Druk daarna
-op Enter.
+Verder niets. JARVIS haalt de OpenAI-sleutel van je klembord en ziet het
+Coinbase-bestand in Downloads verschijnen. Daarna slaat hij ze op en
+controleert hij meteen of ze echt werken.
 
-> **Je ziet niets verschijnen als je plakt of typt.** Dat is expres, zodat
-> niemand kan meelezen. Plak gewoon en druk op Enter.
+> Lukt het oppikken niet — bijvoorbeeld omdat het bestand er al stond — dan
+> krijg je alsnog gewoon een lijstje met gevonden bestanden en kies je een
+> nummer.
+
+Wil je de waarden liever met de hand invoeren, dan kan dat nog steeds:
+
+```
+.venv\Scripts\python -m tools.setup_wizard
+```
+
+> **Bij het invoeren van een secret zie je sterretjes.** Dat is expres, zodat
+> niemand kan meelezen.
+
+Een sleutel later vervangen:
+
+```
+.venv\Scripts\python -m tools.connect_services --reconnect coinbase
+```
 
 Aan het eind staat er:
 

@@ -16,19 +16,17 @@ REM ===============================================================
 REM 1. Python
 REM ===============================================================
 echo [1/7] Python controleren...
-set "PY="
-where py >nul 2>&1 && set "PY=py -3"
+call :ZOEK_PYTHON
 if not defined PY (
-    where python >nul 2>&1 && set "PY=python"
-)
-if not defined PY (
-    call :GEEN_PYTHON
-    exit /b 1
-)
-%PY% --version >nul 2>&1
-if errorlevel 1 (
-    REM Windows heeft een 'python' alias die naar de Store leidt en niets doet.
-    call :GEEN_PYTHON
+    REM Onderscheid maken tussen "geen Python" en "te oude Python": een
+    REM gebruiker met 3.11 kwam hier vroeger gewoon doorheen en liep pas in
+    REM stap 4 vast op een pip-fout die de Python-versie niet noemt.
+    call :ZOEK_PYTHON_OUD
+    if defined PY_OUD (
+        call :PYTHON_TE_OUD
+    ) else (
+        call :GEEN_PYTHON
+    )
     exit /b 1
 )
 for /f "delims=" %%v in ('%PY% --version 2^>^&1') do echo       %%v
@@ -187,30 +185,37 @@ REM 6. Sleutels invoeren
 REM ===============================================================
 echo [6/7] Je API-sleutels instellen...
 echo.
-echo   Houd twee dingen bij de hand:
-echo     - je OpenAI API key    (platform.openai.com/api-keys)
-echo     - het Coinbase JSON-bestand dat je hebt gedownload
+echo   JARVIS opent zo de officiele pagina's van OpenAI en Coinbase.
+echo   Je hoeft niets op te zoeken en geen paden te typen.
 echo.
-echo   De OpenAI-sleutel plak je met een rechtermuisklik. Je ziet
-echo   sterretjes verschijnen; de sleutel zelf blijft onzichtbaar.
+echo   OpenAI    maak een key aan en druk op de kopieerknop.
+echo             JARVIS pikt hem van het klembord.
 echo.
-echo   Voor Coinbase wordt het JSON-BESTAND gebruikt. Staat dat in je
-echo   map Downloads, dan vindt de wizard het zelf en hoef je alleen
-echo   het nummer te typen. Anders sleep je het bestand in dit venster.
-echo   Dat is betrouwbaarder dan de sleutel plakken: een privateKey
-echo   staat op meerdere regels en overleeft plakken niet.
+echo   Coinbase  maak een API-key aan van het type ECDSA en download
+echo             het JSON-bestand. JARVIS ziet de download vanzelf.
+echo.
+echo   Lukt het oppikken niet, dan wordt het alsnog gewoon gevraagd.
 echo.
 pause
 echo.
 
 :SLEUTELS
-"%VENV_PY%" -m tools.setup_wizard
-if not errorlevel 1 goto SLEUTELS_KLAAR
+"%VENV_PY%" -m tools.connect_services
+set "SLEUTELS_CODE=!errorlevel!"
+REM 0 = gekoppeld en geverifieerd, 2 = opgeslagen maar de API was niet
+REM bereikbaar. Alleen 1 betekent dat er echt iets mis is met de sleutels.
+REM Op 2 hier stoppen zou van een tijdelijke internetstoring een mislukte
+REM installatie maken; stap 7 legt dat geval netjes uit.
+if "!SLEUTELS_CODE!"=="0" goto SLEUTELS_KLAAR
+if "!SLEUTELS_CODE!"=="2" goto SLEUTELS_KLAAR
 
 echo.
 echo   ------------------------------------------------------------
 echo   De sleutels zijn nog niet allemaal goed ingesteld.
 echo   Hierboven staat precies wat er mist.
+echo.
+echo   Met de hand invoeren kan ook:
+echo     .venv\Scripts\python -m tools.setup_wizard
 echo   ------------------------------------------------------------
 echo.
 set "NOGMAALS="
@@ -274,6 +279,70 @@ exit /b 0
 REM ===============================================================
 REM Hulpblokken
 REM ===============================================================
+
+:ZOEK_PYTHON
+REM Zoek een Python die de vastgezette pakketten aankan. numpy 2.4 eist
+REM 3.12 of nieuwer, en .python-version noemt 3.12.3. Een oudere versie
+REM installeert requirements.txt niet.
+REM
+REM Op Windows staan vaak meerdere versies naast elkaar, en `py -3` kiest
+REM niet per se de nieuwste. Daarom eerst expliciet de nieuwe versies langs
+REM via de launcher, en pas daarna de standaardkeuzes.
+set "PY="
+where py >nul 2>&1 || goto ZOEK_PYTHON_KAAL
+REM Blokvorm en geen `&&` achter de if: `if not defined PY cmd && set ...`
+REM zou de set koppelen aan de errorlevel van wat er daarvoor liep, en dan
+REM alsnog een al gevonden PY overschrijven.
+for %%v in (3.14 3.13 3.12) do (
+    if not defined PY (
+        py -%%v -c "import sys; raise SystemExit(0 if sys.version_info>=(3,12) else 1)" >nul 2>&1
+        if not errorlevel 1 set "PY=py -%%v"
+    )
+)
+if defined PY goto :eof
+py -3 -c "import sys; raise SystemExit(0 if sys.version_info>=(3,12) else 1)" >nul 2>&1 && set "PY=py -3"
+if defined PY goto :eof
+
+:ZOEK_PYTHON_KAAL
+REM Windows heeft een 'python' alias die naar de Store leidt en niets doet;
+REM die valt hier vanzelf af, want hij voert dit commando niet uit.
+python -c "import sys; raise SystemExit(0 if sys.version_info>=(3,12) else 1)" >nul 2>&1 && set "PY=python"
+goto :eof
+
+:ZOEK_PYTHON_OUD
+REM Is er wel een Python, maar een te oude? Dan is de melding een andere.
+set "PY_OUD="
+set "PY_OUD_VERSIE="
+for %%c in (py python) do (
+    if not defined PY_OUD (
+        where %%c >nul 2>&1 && %%c -c "import sys" >nul 2>&1 && set "PY_OUD=%%c"
+    )
+)
+if not defined PY_OUD goto :eof
+for /f "delims=" %%v in ('!PY_OUD! --version 2^>^&1') do set "PY_OUD_VERSIE=%%v"
+goto :eof
+
+:PYTHON_TE_OUD
+echo.
+echo   ------------------------------------------------------------
+echo   Python is gevonden, maar is te oud.
+echo.
+echo   Gevonden:  !PY_OUD_VERSIE!
+echo   Nodig:     Python 3.12 of nieuwer
+echo.
+echo   De vastgezette pakketten (numpy, pandas) worden niet meer voor
+echo   oudere versies uitgebracht; de installatie zou verderop
+echo   stukloopen op een foutmelding die dit niet uitlegt.
+echo.
+echo   1. Ga naar https://www.python.org/downloads/
+echo   2. Download Python 3.12 of nieuwer.
+echo   3. Zet bij het installeren een vinkje bij
+echo      "Add python.exe to PATH".
+echo   4. Sluit dit venster en start dit bestand opnieuw.
+echo   ------------------------------------------------------------
+echo.
+pause
+goto :eof
 
 :CHECK_NODE
 set "NODE_OK="
