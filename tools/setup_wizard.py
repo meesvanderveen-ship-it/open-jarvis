@@ -179,8 +179,60 @@ def read_secret(prompt: str) -> str:
     return getpass(prompt)
 
 
+def _windows_read_line(prompt: str) -> str:
+    """Lees zichtbare invoer op Windows via dezelfde laag als de secret-lezer.
+
+    Dit moet met msvcrt en niet met `input()`. Beide lezen weliswaar van de
+    console, maar via verschillende lagen: msvcrt praat rechtstreeks met de
+    console-invoerbuffer, `input()` gaat door de gebufferde stdin van de
+    C-runtime. Die twee delen geen buffer, en vooral: het teken dat
+    `_drain_pending_newlines` met `msvcrt.ungetwch` terugduwt belandt in de
+    pushback van msvcrt, waar `input()` nooit naar kijkt.
+
+    Het gevolg was zichtbaar precies daar waar de OpenAI-vraag (msvcrt) wordt
+    gevolgd door de Coinbase-vraag (`input()`): tekens die na een plakactie
+    achterbleven verdwenen, en die vraag gedroeg zich onvoorspelbaar.
+    """
+    import msvcrt
+
+    _drain_pending_newlines()
+    for char in prompt:
+        msvcrt.putwch(char)
+
+    buffer: list[str] = []
+    while True:
+        char = msvcrt.getwch()
+        if char in ("\x00", "\xe0"):  # pijl-/functietoets stuurt twee tekens
+            msvcrt.getwch()
+            continue
+        if char in ("\r", "\n"):
+            break
+        if char == "\x03":
+            raise KeyboardInterrupt
+        if char in ("\b", "\x7f"):
+            if buffer:
+                buffer.pop()
+                for out in "\b \b":
+                    msvcrt.putwch(out)
+            continue
+        buffer.append(char)
+        # Geen secret: het teken wordt gewoon getoond, zodat een pad of
+        # nummer te controleren is voor er op Enter wordt gedrukt.
+        msvcrt.putwch(char)
+
+    msvcrt.putwch("\r")
+    msvcrt.putwch("\n")
+    _drain_pending_newlines()
+    return "".join(buffer)
+
+
 def read_line(prompt: str) -> str:
     """Lees zichtbare invoer (een bestandspad, een keuze) -- geen secret."""
+    if os.name == "nt" and sys.stdin is sys.__stdin__:
+        try:
+            return _windows_read_line(prompt)
+        except ImportError:  # msvcrt ontbreekt: val terug op de standaard
+            pass
     return input(prompt)
 
 

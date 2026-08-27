@@ -936,3 +936,100 @@ def test_full_wizard_needs_only_enter_and_a_number(tmp_path, monkeypatch):
     values = env_file.read_env(target)
     assert values["COINBASE_API_SECRET"].replace("\\n", "\n") == pem.strip()
     assert values["OPENAI_API_KEY"].startswith("sk-proj-")
+
+
+def test_openai_paste_does_not_corrupt_the_following_coinbase_prompt(monkeypatch):
+    """Regressie: de Coinbase-vraag gedroeg zich raar na het plakken van OpenAI.
+
+    De OpenAI-sleutel wordt via msvcrt gelezen, de Coinbase-vraag ging via
+    `input()`. Dat zijn twee verschillende invoerlagen: msvcrt leest de
+    console-buffer rechtstreeks, `input()` gaat door de gebufferde stdin van
+    de C-runtime. Een teken dat `_drain_pending_newlines` met `ungetwch`
+    terugduwt komt in de pushback van msvcrt terecht, waar `input()` nooit
+    naar kijkt -- dat teken verdween dus, en de vraag erna liep vast of sloeg
+    over. Beide vragen horen daarom dezelfde laag te gebruiken.
+    """
+    from tools import setup_wizard
+
+    console = _FakeWindowsConsole(["sk-geplakte-sleutel", "2"])
+    monkeypatch.setitem(sys.modules, "msvcrt", console)
+
+    secret = setup_wizard._windows_read_secret("  OpenAI: ")
+    keuze = setup_wizard._windows_read_line("  Nummer: ")
+
+    assert secret == "sk-geplakte-sleutel"
+    assert keuze == "2"
+
+
+def test_windows_line_reader_shows_what_is_typed(monkeypatch):
+    """Een pad of nummer is geen secret en moet leesbaar zijn."""
+    from tools import setup_wizard
+
+    console = _FakeWindowsConsole(["C:\\keys\\cdp.json"])
+    monkeypatch.setitem(sys.modules, "msvcrt", console)
+
+    gelezen = setup_wizard._windows_read_line("  Pad: ")
+
+    assert gelezen == "C:\\keys\\cdp.json"
+    assert "C:\\keys\\cdp.json" in "".join(console.echoed)
+    # Een secret wordt gemaskeerd, dit juist niet.
+    assert "*" not in "".join(console.echoed)
+
+
+def test_windows_line_reader_ignores_arrow_keys(monkeypatch):
+    """Pijltoetsen sturen twee tekens en mogen niet in het pad belanden."""
+    from tools import setup_wizard
+
+    console = _FakeWindowsConsole([])
+    console.pending = list("cdp") + ["\xe0", "H"] + list(".json\r\n")
+    monkeypatch.setitem(sys.modules, "msvcrt", console)
+
+    assert setup_wizard._windows_read_line("  Pad: ") == "cdp.json"
+
+
+def test_windows_line_reader_supports_backspace(monkeypatch):
+    from tools import setup_wizard
+
+    console = _FakeWindowsConsole([])
+    console.pending = list("12") + ["\b"] + list("3\r\n")
+    monkeypatch.setitem(sys.modules, "msvcrt", console)
+
+    assert setup_wizard._windows_read_line("  Nummer: ") == "13"
+
+
+def test_read_line_uses_the_windows_reader_on_windows(monkeypatch):
+    """De routering zelf vastleggen, niet alleen de lezer.
+
+    Zonder deze test kan read_line ongemerkt terugvallen op input() en is de
+    bug hierboven terug zonder dat er iets faalt.
+    """
+    from tools import setup_wizard
+
+    monkeypatch.setattr(setup_wizard.os, "name", "nt")
+    monkeypatch.setattr(setup_wizard.sys, "stdin", setup_wizard.sys.__stdin__)
+
+    gebruikt: list[str] = []
+    monkeypatch.setattr(
+        setup_wizard,
+        "_windows_read_line",
+        lambda prompt: gebruikt.append(prompt) or "gelezen",
+    )
+
+    assert setup_wizard.read_line("  Nummer: ") == "gelezen"
+    assert gebruikt == ["  Nummer: "]
+
+
+def test_read_line_falls_back_to_input_without_msvcrt(monkeypatch):
+    """Op een systeem zonder msvcrt moet de gewone route blijven werken."""
+    from tools import setup_wizard
+
+    monkeypatch.setattr(setup_wizard.os, "name", "nt")
+    monkeypatch.setattr(setup_wizard.sys, "stdin", setup_wizard.sys.__stdin__)
+
+    def geen_msvcrt(prompt):
+        raise ImportError("msvcrt bestaat hier niet")
+
+    monkeypatch.setattr(setup_wizard, "_windows_read_line", geen_msvcrt)
+    monkeypatch.setattr("builtins.input", lambda prompt: "via-input")
+
+    assert setup_wizard.read_line("  Pad: ") == "via-input"
