@@ -171,3 +171,60 @@ def test_readme_covers_the_required_failure_situations(readme: str) -> None:
         "draait nu niet op deze pc",
     ):
         assert topic in lowered, f"de README behandelt '{topic}' niet"
+
+
+# --------------------------------------------------------------------------
+# De twee handleidingen mogen elkaar niet tegenspreken
+# --------------------------------------------------------------------------
+
+INSTALL_GUIDE = PROJECT_ROOT / "INSTALLATIE-WINDOWS.md"
+
+
+@pytest.fixture(scope="module")
+def install_guide() -> str:
+    return INSTALL_GUIDE.read_text(encoding="utf-8")
+
+
+def test_both_guides_name_the_same_minimum_python_version(readme: str, install_guide: str) -> None:
+    """Twee documenten die een andere versie noemen sturen de lezer het bos in."""
+    from tools.check_python import MINIMUM
+
+    minimum = f"{MINIMUM[0]}.{MINIMUM[1]}"
+
+    assert minimum in readme, f"de README noemt {minimum} niet"
+    assert minimum in install_guide, f"de installatiehandleiding noemt {minimum} niet"
+    assert "3.12 of nieuwer" not in install_guide, "de oude, te strenge eis staat er nog"
+
+
+def test_both_guides_describe_stopping_the_same_way(install_guide: str) -> None:
+    """Vensters wegklikken kan de bot midden in een handeling afbreken."""
+    assert "stop.bat" in install_guide
+    assert "Sluit de twee zwarte vensters. Of klik erin" not in install_guide
+
+
+def test_install_guide_mentions_the_supervisor(install_guide: str) -> None:
+    assert "bewaker" in install_guide.lower()
+
+
+def test_install_guide_mentions_the_chrome_extension(install_guide: str) -> None:
+    assert "chrome://extensions" in install_guide
+    assert "control_token.txt" in install_guide
+
+
+def test_install_guide_points_at_the_technical_readme_not_the_old_one(install_guide: str) -> None:
+    """De technische uitleg is verplaatst; een verwijzing naar README.md klopt niet meer."""
+    assert "TECHNISCHE-README.md" in install_guide
+    assert "beschreven in\n`README.md`" not in install_guide
+
+
+def test_install_guide_separates_unreachable_from_a_wrong_key(install_guide: str) -> None:
+    lowered = install_guide.lower()
+
+    assert "niet bereikbaar" in lowered
+    assert "geen** sleutelprobleem" in lowered or "geen sleutelprobleem" in lowered
+
+
+@pytest.mark.parametrize("script", ["install.bat", "start.bat", "stop.bat", "diagnose.bat"])
+def test_install_guide_only_names_scripts_that_exist(install_guide: str, script: str) -> None:
+    if script in install_guide:
+        assert (PROJECT_ROOT / script).exists()

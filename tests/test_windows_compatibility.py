@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import ast
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -343,3 +344,72 @@ def test_state_hashing_matches_hashlib_for_a_real_file(tmp_path, monkeypatch):
     hashes = module._state_hashes()
 
     assert hashes["state/open_orders.json"] == hashlib.sha256(payload).hexdigest()
+
+
+# --------------------------------------------------------------------------
+# Verwijzingen vanuit de batchbestanden naar Python
+# --------------------------------------------------------------------------
+
+
+def _modules_referenced_by_batch_files() -> set[str]:
+    """Alle `python -m <module>` aanroepen uit de .bat-bestanden."""
+    pattern = re.compile(r"-m\s+([a-z_]+(?:\.[a-z_]+)+)")
+    found: set[str] = set()
+    for path in _bat_files():
+        found.update(pattern.findall(path.read_text(encoding="utf-8")))
+    return found
+
+
+def test_batch_files_reference_at_least_the_known_modules():
+    """Vangt een lege of stukgelopen zoekactie af, zodat de test hieronder telt."""
+    modules = _modules_referenced_by_batch_files()
+
+    assert {"bot.health_check", "control_service.run", "tools.jarvis_control"} <= modules
+
+
+@pytest.mark.parametrize("module", sorted(_modules_referenced_by_batch_files()), ids=lambda m: m)
+def test_every_module_a_batch_file_calls_can_be_imported(module: str):
+    """Een typefout in een .bat zou pas op de pc van de gebruiker opvallen.
+
+    Daar levert het een ModuleNotFoundError op in een zwart venster -- precies
+    de foutmelding die een niet-programmeur niets zegt.
+    """
+    import importlib
+
+    importlib.import_module(module)
+
+
+@pytest.mark.parametrize("module", sorted(_modules_referenced_by_batch_files()), ids=lambda m: m)
+def test_every_module_a_batch_file_calls_is_runnable_as_a_script(module: str):
+    """`python -m x` werkt alleen als de module een __main__-ingang heeft."""
+    import importlib
+
+    imported = importlib.import_module(module)
+    source = Path(imported.__file__).read_text(encoding="utf-8")
+
+    assert '__name__ == "__main__"' in source, f"{module} is niet met -m te starten"
+
+
+def _scripts_referenced_by_batch_files() -> set[str]:
+    """Losse scriptaanroepen zoals `python tools\\check_python.py`."""
+    pattern = re.compile(r'"%VENV_PY%"\s+([a-zA-Z0-9_\\/.-]+\.py)')
+    found: set[str] = set()
+    for path in _bat_files():
+        found.update(pattern.findall(path.read_text(encoding="utf-8")))
+    return found
+
+
+@pytest.mark.parametrize("script", sorted(_scripts_referenced_by_batch_files()), ids=lambda s: s)
+def test_every_script_a_batch_file_calls_exists(script: str):
+    target = PROJECT_ROOT / script.replace("\\", "/")
+
+    assert target.exists(), f"een .bat roept {script} aan, dat niet bestaat"
+
+
+def test_batch_files_only_call_test_files_that_exist():
+    """DIAGNOSE en de installer draaien een vaste lijst tests als zelftest."""
+    pattern = re.compile(r"(tests\\[a-z0-9_]+\.py|control_service\\tests)")
+    for path in _bat_files():
+        for reference in pattern.findall(path.read_text(encoding="utf-8")):
+            target = PROJECT_ROOT / reference.replace("\\", "/")
+            assert target.exists(), f"{path.name} verwijst naar {reference}, dat niet bestaat"
