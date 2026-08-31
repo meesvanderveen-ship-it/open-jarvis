@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -7,10 +8,24 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 
 PHASE_FOLLOWER_RECEIVER_API_AUDIT = "follower_receiver_api_audit_v1"
-DEFAULT_FOLLOWER_PATHS = (
-    "/opt/coinbase-replica",
-    "/root/apps/Crypto/coinbase-replica",
-)
+
+
+def _default_follower_paths() -> tuple[str, ...]:
+    """Waar de replica-installatie gezocht wordt.
+
+    De twee paden hieronder zijn de bekende Linux-serverlocaties en blijven de
+    standaard, zodat bestaande deployments niets merken. Ze staan alleen niet
+    langer vast: op een Windows-pc bestaan ze niet, en dan moet iemand kunnen
+    aanwijzen waar de replica wel staat. Meerdere paden scheiden met os.pathsep
+    (';' op Windows, ':' op Linux).
+    """
+    override = (os.environ.get("FOLLOWER_RECEIVER_PATHS") or "").strip()
+    if override:
+        return tuple(part for part in override.split(os.pathsep) if part.strip())
+    return ("/opt/coinbase-replica", "/root/apps/Crypto/coinbase-replica")
+
+
+DEFAULT_FOLLOWER_PATHS = _default_follower_paths()
 TEXT_SUFFIXES = {".py", ".md", ".txt", ".toml", ".yaml", ".yml", ".json", ".ini", ".cfg"}
 ROUTE_RE = re.compile(
     r"@(?:app|router|api|bp)\.(?:get|post|put|delete|patch)\(\s*[\"']([^\"']+)[\"']",

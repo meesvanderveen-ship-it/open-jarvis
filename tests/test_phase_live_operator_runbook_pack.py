@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from bot.phase_live_operator_runbook_pack import (
     build_monitoring_commands,
     build_operator_started_24h_live_test_pack,
@@ -63,7 +65,11 @@ def test_pack_explains_operator_start_without_authorizing_it() -> None:
     report = build_operator_started_24h_live_test_pack(generated_at="2026-06-08T00:00:00Z")
     start = report["start_instructions"]
 
-    assert start["working_directory"] == "/root/apps/Crypto/coinbase_bot"
+    # Was: een vast serverpad (/root/apps/Crypto/coinbase_bot). Een operator op
+    # Windows kreeg daardoor een werkmap te zien die op zijn pc niet bestaat.
+    # De runbook hoort de map te noemen waar dit project echt staat.
+    assert start["working_directory"] == str(Path(__file__).resolve().parents[1])
+    assert "/root/apps" not in start["working_directory"]
     assert ".venv/bin/python run_trader_loop.py" in start["repo_direct_start_if_no_bash_exists"]
     assert "tools/operator_btc_usdc_tiny_env.sh python3 run_trader_loop.py" not in start["repo_direct_start_if_no_bash_exists"]
     assert "run_trader_loop.py --startup-diagnostic" in start["startup_diagnostic"]

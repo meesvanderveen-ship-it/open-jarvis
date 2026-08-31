@@ -17,7 +17,12 @@ def test_workflow_review_is_read_only_and_reports_required_questions():
 
 
 def test_workflow_review_tool_writes_audit_reports(tmp_path, monkeypatch):
-    monkeypatch.chdir("/root/apps/Crypto/coinbase_bot")
+    # Was: monkeypatch.chdir("/root/apps/Crypto/coinbase_bot"). Die map bestaat
+    # alleen op één server, dus deze test faalde overal elders met een
+    # FileNotFoundError -- ook in de nulmeting van deze audit. De tool schrijft
+    # bewust alleen onder cwd/reports/audits, dus een tijdelijke map is precies
+    # wat hier hoort te staan en dekt de assertions hieronder onveranderd.
+    monkeypatch.chdir(tmp_path)
     json_out = tmp_path / "reports/audits/full-workflow-critical-review-latest.json"
     md_out = tmp_path / "reports/audits/full-workflow-critical-review-latest.md"
     # The tool intentionally restricts writes to cwd/reports/audits, so use default cwd path here.

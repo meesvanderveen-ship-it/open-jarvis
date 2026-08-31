@@ -15,7 +15,7 @@ echo.
 REM ===============================================================
 REM 1. Python
 REM ===============================================================
-echo [1/7] Python controleren...
+echo [1/9] Python controleren...
 call :ZOEK_PYTHON
 if not defined PY (
     REM Onderscheid maken tussen "geen Python" en "te oude Python": een
@@ -35,7 +35,7 @@ echo.
 REM ===============================================================
 REM 2. Node.js en npm (apart controleren; npm kan los ontbreken)
 REM ===============================================================
-echo [2/7] Node.js en npm controleren...
+echo [2/9] Node.js en npm controleren...
 call :CHECK_NODE
 if "%NODE_OK%"=="1" goto NODE_KLAAR
 
@@ -106,7 +106,7 @@ echo.
 REM ===============================================================
 REM 3. Python-omgeving
 REM ===============================================================
-echo [3/7] Python-omgeving klaarzetten...
+echo [3/9] Python-omgeving klaarzetten...
 if not exist ".venv\Scripts\python.exe" (
     %PY% -m venv .venv
     if errorlevel 1 (
@@ -128,18 +128,45 @@ echo.
 REM ===============================================================
 REM 4. Python-pakketten
 REM ===============================================================
-echo [4/7] Python-pakketten installeren, even geduld...
-"%VENV_PY%" -m pip install --upgrade pip --quiet
-"%VENV_PY%" -m pip install -r requirements.txt --quiet
+echo [4/9] Python-pakketten installeren, even geduld...
+
+REM Eerst nog een keer de versie controleren, nu met de Python die de
+REM pakketten straks echt krijgt. tools\check_python.py gebruikt alleen de
+REM standaardbibliotheek en werkt dus voordat er iets geinstalleerd is.
+"%VENV_PY%" tools\check_python.py
 if errorlevel 1 (
-    echo   FOUT: installeren van de Python-pakketten is mislukt.
+    echo.
+    echo   ------------------------------------------------------------
+    echo   De Python-versie in de projectomgeving is niet geschikt.
+    echo   Hierboven staat welke versie nodig is.
+    echo.
+    echo   Verwijder de map .venv en start dit bestand opnieuw nadat je
+    echo   een geschikte Python hebt geinstalleerd.
+    echo   ------------------------------------------------------------
+    echo.
     pause
     exit /b 1
 )
-REM Het dashboard heeft een eigen lijst (fastapi, uvicorn).
-"%VENV_PY%" -m pip install -r dashboard\backend\requirements.txt --quiet
+
+"%VENV_PY%" -m pip install --upgrade pip --quiet
+REM requirements-dev.txt bevat requirements.txt, de dashboardlijst
+REM (fastapi, uvicorn) en pytest. In een keer installeren voorkomt de
+REM versiebotsing die ontstond toen de twee lijsten los werden gedraaid.
+"%VENV_PY%" -m pip install -r requirements-dev.txt --quiet
 if errorlevel 1 (
-    echo   FOUT: installeren van de dashboard-pakketten is mislukt.
+    echo.
+    echo   ------------------------------------------------------------
+    echo   FOUT: installeren van de Python-pakketten is mislukt.
+    echo.
+    echo   Meest voorkomende oorzaken:
+    echo     - geen internetverbinding
+    echo     - een virusscanner die de download blokkeert
+    echo     - te weinig schijfruimte
+    echo.
+    echo   Hierboven staat de melding van pip. Probeer het opnieuw
+    echo   zodra je internet weer werkt.
+    echo   ------------------------------------------------------------
+    echo.
     pause
     exit /b 1
 )
@@ -149,7 +176,7 @@ echo.
 REM ===============================================================
 REM 5. Dashboard bouwen
 REM ===============================================================
-echo [5/7] Dashboard bouwen...
+echo [5/9] Dashboard bouwen...
 pushd dashboard\frontend
 REM npm ci volgt package-lock.json exact; npm install zou de lockfile
 REM kunnen wijzigen en een andere versiecombinatie kunnen opleveren.
@@ -183,7 +210,7 @@ echo.
 REM ===============================================================
 REM 6. Sleutels invoeren
 REM ===============================================================
-echo [6/7] Je API-sleutels instellen...
+echo [6/9] Je API-sleutels instellen...
 echo.
 echo   JARVIS opent zo de officiele pagina's van OpenAI en Coinbase.
 echo   Je hoeft niets op te zoeken en geen paden te typen.
@@ -241,13 +268,42 @@ echo.
 REM ===============================================================
 REM 7. Online validatie -- werken de sleutels echt?
 REM ===============================================================
-echo [7/7] Sleutels controleren bij OpenAI en Coinbase...
+echo [7/9] Sleutels controleren bij OpenAI en Coinbase...
 echo       Dit doet alleen leesvragen. Er wordt niets gekocht of verkocht.
 echo.
 "%VENV_PY%" -m tools.setup_wizard --check --online
 set "ONLINE=%errorlevel%"
-
 echo.
+
+REM ===============================================================
+REM 8. Zelftest -- draait de installatie ook echt?
+REM ===============================================================
+echo [8/9] Zelftest van de installatie...
+echo       Dit duurt ongeveer een minuut en handelt niet.
+echo.
+"%VENV_PY%" -m pytest -q tests\test_windows_compatibility.py tests\test_health_check.py tests\test_resilience.py tests\test_supervisor.py tests\test_chrome_extension.py control_service\tests
+set "ZELFTEST=%errorlevel%"
+if "%ZELFTEST%"=="0" (
+    echo.
+    echo       De zelftest is geslaagd.
+) else (
+    echo.
+    echo       LET OP: de zelftest is niet volledig geslaagd.
+    echo       Hierboven staat welke controle faalde.
+)
+echo.
+
+REM ===============================================================
+REM 9. Toegangssleutel voor de Chrome-extensie
+REM ===============================================================
+echo [9/9] Chrome-extensie voorbereiden...
+"%VENV_PY%" -c "from control_service import auth; auth.ensure_token(); print('      Toegangssleutel staat klaar.')"
+if errorlevel 1 (
+    echo       LET OP: de toegangssleutel kon niet aangemaakt worden.
+    echo       De bot werkt gewoon; alleen de Chrome-extensie nog niet.
+)
+echo.
+
 echo ============================================================
 if "%ONLINE%"=="0" (
     echo   INSTALLATIE GELUKT
@@ -270,6 +326,19 @@ if "%ONLINE%"=="0" (
     echo   Hierboven staat welke en waarom.
     echo   Haal die sleutel opnieuw op en start dit bestand opnieuw.
 )
+if not "%ZELFTEST%"=="0" (
+    echo.
+    echo   De zelftest meldde een probleem. Draai DIAGNOSE-JARVIS.bat
+    echo   voor het volledige beeld voordat je de bot laat handelen.
+)
+echo.
+echo   Chrome-extensie installeren (optioneel):
+echo     1. Open Chrome en ga naar  chrome://extensions
+echo     2. Zet rechtsboven "Ontwikkelaarsmodus" aan
+echo     3. Klik op "Uitgepakte extensie laden"
+echo     4. Kies de map:  %CD%\extension
+echo     5. Plak in de instellingen de sleutel uit:
+echo        %CD%\state\control_token.txt
 echo ============================================================
 echo.
 pause
@@ -281,9 +350,14 @@ REM Hulpblokken
 REM ===============================================================
 
 :ZOEK_PYTHON
-REM Zoek een Python die de vastgezette pakketten aankan. numpy 2.4 eist
-REM 3.12 of nieuwer, en .python-version noemt 3.12.3. Een oudere versie
-REM installeert requirements.txt niet.
+REM Zoek een Python die de vastgezette pakketten aankan.
+REM
+REM De ondergrens is 3.11 en niet 3.12. Die 3.12 stond hier op grond van de
+REM aanname dat numpy 2.4 nieuwer eist, maar numpy 2.4.3 en pandas 3.0.1
+REM publiceren allebei `Requires-Python >=3.11` en leveren kant-en-klare
+REM cp311-pakketten. Een gebruiker met een werkende Python 3.11 werd dus
+REM weggestuurd om iets te installeren dat hij al had. Dezelfde ondergrens
+REM staat in tools/check_python.py, dat verderop de echte controle doet.
 REM
 REM Op Windows staan vaak meerdere versies naast elkaar, en `py -3` kiest
 REM niet per se de nieuwste. Daarom eerst expliciet de nieuwe versies langs
@@ -293,20 +367,20 @@ where py >nul 2>&1 || goto ZOEK_PYTHON_KAAL
 REM Blokvorm en geen `&&` achter de if: `if not defined PY cmd && set ...`
 REM zou de set koppelen aan de errorlevel van wat er daarvoor liep, en dan
 REM alsnog een al gevonden PY overschrijven.
-for %%v in (3.14 3.13 3.12) do (
+for %%v in (3.14 3.13 3.12 3.11) do (
     if not defined PY (
-        py -%%v -c "import sys; raise SystemExit(0 if sys.version_info>=(3,12) else 1)" >nul 2>&1
+        py -%%v -c "import sys; raise SystemExit(0 if (3,11)<=sys.version_info<(3,15) else 1)" >nul 2>&1
         if not errorlevel 1 set "PY=py -%%v"
     )
 )
 if defined PY goto :eof
-py -3 -c "import sys; raise SystemExit(0 if sys.version_info>=(3,12) else 1)" >nul 2>&1 && set "PY=py -3"
+py -3 -c "import sys; raise SystemExit(0 if (3,11)<=sys.version_info<(3,15) else 1)" >nul 2>&1 && set "PY=py -3"
 if defined PY goto :eof
 
 :ZOEK_PYTHON_KAAL
 REM Windows heeft een 'python' alias die naar de Store leidt en niets doet;
 REM die valt hier vanzelf af, want hij voert dit commando niet uit.
-python -c "import sys; raise SystemExit(0 if sys.version_info>=(3,12) else 1)" >nul 2>&1 && set "PY=python"
+python -c "import sys; raise SystemExit(0 if (3,11)<=sys.version_info<(3,15) else 1)" >nul 2>&1 && set "PY=python"
 goto :eof
 
 :ZOEK_PYTHON_OUD
@@ -328,14 +402,14 @@ echo   ------------------------------------------------------------
 echo   Python is gevonden, maar is te oud.
 echo.
 echo   Gevonden:  !PY_OUD_VERSIE!
-echo   Nodig:     Python 3.12 of nieuwer
+echo   Nodig:     Python 3.11 tot en met 3.14
 echo.
-echo   De vastgezette pakketten (numpy, pandas) worden niet meer voor
+echo   De vastgezette pakketten (numpy, pandas) worden niet voor
 echo   oudere versies uitgebracht; de installatie zou verderop
 echo   stukloopen op een foutmelding die dit niet uitlegt.
 echo.
 echo   1. Ga naar https://www.python.org/downloads/
-echo   2. Download Python 3.12 of nieuwer.
+echo   2. Download Python 3.12.
 echo   3. Zet bij het installeren een vinkje bij
 echo      "Add python.exe to PATH".
 echo   4. Sluit dit venster en start dit bestand opnieuw.

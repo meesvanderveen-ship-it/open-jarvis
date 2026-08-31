@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="nl">
+  <head>
+    <meta charset="utf-8" />
+    <title>JARVIS — instellingen</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body class="options">
+    <h1>JARVIS — instellingen</h1>
+
+    <section class="panel">
+      <h2>Verbinding met je pc</h2>
+      <p class="message">
+        Deze extensie praat alleen met JARVIS op je eigen computer. Er gaat niets naar internet
+        en er staan hier geen sleutels van Coinbase of OpenAI in — die blijven in het
+        programma op je pc.
+      </p>
+
+      <label for="base-url">Adres van de achtergronddienst</label>
+      <input id="base-url" type="text" spellcheck="false" placeholder="http://127.0.0.1:8770" />
+      <p class="footnote">Laat dit staan tenzij je de poort zelf hebt gewijzigd.</p>
+
+      <label for="token">Toegangssleutel</label>
+      <input id="token" type="password" spellcheck="false" autocomplete="off" />
+      <p class="footnote">
+        Deze sleutel staat in het bestand <code>state\control_token.txt</code> in je
+        JARVIS-map. Open dat bestand met Kladblok, kopieer de regel en plak hem hierboven.
+        De sleutel geldt alleen voor je eigen pc en geeft géén toegang tot je geld.
+      </p>
+      <label class="checkbox"><input id="show-token" type="checkbox" /> Sleutel tonen</label>
+
+      <div class="controls">
+        <button id="btn-save" type="button" class="primary">Opslaan</button>
+        <button id="btn-test" type="button">Verbinding testen</button>
+      </div>
+
+      <p id="result" class="message" hidden></p>
+    </section>
+
+    <section class="panel">
+      <h2>Hoe installeer ik deze extensie?</h2>
+      <ol class="steps">
+        <li>Open Chrome en ga naar <code>chrome://extensions</code>.</li>
+        <li>Zet rechtsboven <strong>Ontwikkelaarsmodus</strong> aan.</li>
+        <li>Klik op <strong>Uitgepakte extensie laden</strong>.</li>
+        <li>Kies de map <code>extension</code> in je JARVIS-map.</li>
+        <li>Kom terug op deze pagina en plak je toegangssleutel hierboven.</li>
+      </ol>
+    </section>
+
+    <script type="module" src="options.js"></script>
+  </body>
+</html>

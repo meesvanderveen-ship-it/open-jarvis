@@ -88,25 +88,65 @@ if "%PREFLIGHT%"=="1" (
     )
 )
 
+REM ===============================================================
+REM Systeemcontrole: nooit starten en dan pas ontdekken dat er iets mist
+REM ===============================================================
+echo.
+echo Systeemcontrole...
+echo.
+"%VENV_PY%" -m bot.health_check
+set "HEALTH=%errorlevel%"
+if "%HEALTH%"=="1" (
+    echo.
+    echo ------------------------------------------------------------
+    echo   JARVIS start niet: er ontbreekt iets belangrijks.
+    echo   Hierboven staat wat, en wat je eraan kunt doen.
+    echo.
+    echo   Draai DIAGNOSE-JARVIS.bat voor een volledige controle.
+    echo ------------------------------------------------------------
+    echo.
+    pause
+    exit /b 1
+)
+
 echo.
 echo ------------------------------------------------------------
 echo   Alles staat goed. JARVIS start nu.
 echo.
 echo   Er openen twee zwarte vensters. Laat ze allebei open staan;
 echo   sluiten betekent stoppen.
+echo.
+echo   De bot zelf draait onder een bewaker. Crasht hij door een
+echo   storing, dan wordt hij vanzelf opnieuw gestart.
 echo ------------------------------------------------------------
 echo.
 
 REM ===============================================================
-REM Beide processen krijgen een eigen venster. Hier staat bewust het
+REM Beide vensters draaien een langlopende dienst. Hier staat bewust het
 REM relatieve pad .venv\Scripts\python.exe: dat bevat zelf geen spaties,
 REM ook niet als de projectmap in bijvoorbeeld "Mijn Documenten" staat.
 REM ===============================================================
 echo Dashboard starten...
 start "JARVIS dashboard" cmd /k ".venv\Scripts\python.exe -m dashboard.backend.run"
 
-echo Bot starten...
-start "JARVIS bot" cmd /k ".venv\Scripts\python.exe run_trader_loop.py"
+echo Achtergronddienst voor de Chrome-extensie starten...
+start "JARVIS achtergronddienst" cmd /k ".venv\Scripts\python.exe -m control_service.run"
+
+REM De bot niet rechtstreeks starten maar via de bewaker: die logt een
+REM crash, ruimt op, wacht af en start opnieuw. Zonder die laag zou een
+REM enkele exceptie het botvenster leeg achterlaten zonder uitleg.
+echo Bot starten onder bewaking...
+"%VENV_PY%" -m tools.jarvis_control start
+if errorlevel 1 (
+    echo.
+    echo ------------------------------------------------------------
+    echo   De bot is niet gestart. Hierboven staat waarom.
+    echo   Kijk zo nodig in:  logs\supervisor.log
+    echo ------------------------------------------------------------
+    echo.
+    pause
+    exit /b 1
+)
 
 REM ===============================================================
 REM Wachten tot de webserver echt antwoordt. Een vaste wachttijd is
@@ -139,7 +179,29 @@ if defined GEREED (
     echo   Je kunt zelf proberen:  http://127.0.0.1:8000
 )
 
+REM ===============================================================
+REM Toegangssleutel voor de Chrome-extensie
+REM ===============================================================
+if exist "state\control_token.txt" (
+    echo.
+    echo ------------------------------------------------------------
+    echo   Chrome-extensie
+    echo.
+    echo   De extensie heeft eenmalig een toegangssleutel nodig.
+    echo   Die staat in dit bestand:
+    echo     %CD%\state\control_token.txt
+    echo.
+    echo   Open het met Kladblok, kopieer de regel en plak hem in de
+    echo   instellingen van de JARVIS-extensie in Chrome.
+    echo.
+    echo   Deel deze sleutel met niemand. Hij geeft toegang tot het
+    echo   starten en stoppen van de bot op deze pc.
+    echo ------------------------------------------------------------
+)
+
 echo.
 echo Dit venster mag je sluiten. De twee andere niet.
+echo.
+echo Stoppen doe je met:  STOP-JARVIS.bat
 echo.
 pause

@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="nl">
+  <head>
+    <meta charset="utf-8" />
+    <title>JARVIS Trading Bot</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header>
+      <h1>JARVIS</h1>
+      <span id="state-pill" class="pill pill-neutral">Verbinden…</span>
+    </header>
+
+    <p id="state-message" class="message">De status wordt opgehaald…</p>
+    <p id="state-advice" class="advice" hidden></p>
+
+    <section class="controls">
+      <button id="btn-start" type="button" class="primary">Starten</button>
+      <button id="btn-stop" type="button">Stoppen</button>
+      <button id="btn-restart" type="button">Herstarten</button>
+    </section>
+
+    <p id="action-result" class="action-result" hidden></p>
+
+    <section class="panel">
+      <h2>Systeemcontrole</h2>
+      <ul id="health-list" class="health">
+        <li class="muted">Nog niet opgehaald.</li>
+      </ul>
+    </section>
+
+    <section class="panel">
+      <h2>Sleutels</h2>
+      <button id="btn-validate" type="button" class="link">Controleer mijn API-sleutels</button>
+      <p id="validate-result" class="message" hidden></p>
+      <p class="footnote">Dit doet alleen leesvragen. Er wordt niets gekocht of verkocht.</p>
+    </section>
+
+    <section class="panel">
+      <h2>Laatste logregels</h2>
+      <div class="log-controls">
+        <select id="log-name" aria-label="Kies logbestand">
+          <option value="bot">Bot</option>
+          <option value="supervisor">Bewaker</option>
+          <option value="control">Achtergronddienst</option>
+        </select>
+        <button id="btn-logs" type="button" class="link">Ophalen</button>
+      </div>
+      <pre id="log-output" class="log" hidden></pre>
+    </section>
+
+    <footer>
+      <button id="btn-refresh" type="button" class="link">Vernieuwen</button>
+      <button id="btn-options" type="button" class="link">Instellingen</button>
+    </footer>
+
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>
