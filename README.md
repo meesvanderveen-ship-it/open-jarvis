@@ -402,6 +402,8 @@ nooit zonder dat je hebt kunnen lezen wat er aan de hand is.
 
 - [`docs/TECHNISCHE-README.md`](docs/TECHNISCHE-README.md) — volledige
   technische documentatie: architectuur, alle instellingen, veiligheidslagen.
+- [`docs/FAILURES.md`](docs/FAILURES.md) — welke tests bekend rood staan en
+  waarom. Bijna allemaal veiligheidspoorten die dicht horen te staan.
 - [`INSTALLATIE-WINDOWS.md`](INSTALLATIE-WINDOWS.md) — extra detail over de
   Windows-installatie.
 - [`.env.example`](.env.example) — elke instelling met uitleg.

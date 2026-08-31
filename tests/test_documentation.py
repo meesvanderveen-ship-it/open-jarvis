@@ -228,3 +228,68 @@ def test_install_guide_separates_unreachable_from_a_wrong_key(install_guide: str
 def test_install_guide_only_names_scripts_that_exist(install_guide: str, script: str) -> None:
     if script in install_guide:
         assert (PROJECT_ROOT / script).exists()
+
+
+# --------------------------------------------------------------------------
+# Het failure-register moet intern kloppen
+# --------------------------------------------------------------------------
+
+FAILURES = PROJECT_ROOT / "docs" / "FAILURES.md"
+
+
+@pytest.fixture(scope="module")
+def failures_register() -> str:
+    return FAILURES.read_text(encoding="utf-8")
+
+
+def _listed_nodeids(text: str) -> list[str]:
+    return re.findall(r"^- `([^`]+::[^`]+)`$", text, re.M)
+
+
+def test_register_exists(failures_register: str) -> None:
+    assert len(failures_register) > 2000
+
+
+def test_register_count_matches_the_number_of_listed_tests(failures_register: str) -> None:
+    """Een register dat een ander aantal noemt dan het opsomt, is niet te vertrouwen."""
+    stated = int(re.search(r"\*\*\d+ geslaagd, (\d+) gefaald", failures_register).group(1))
+
+    assert len(_listed_nodeids(failures_register)) == stated
+
+
+def test_register_lists_no_test_twice(failures_register: str) -> None:
+    listed = _listed_nodeids(failures_register)
+
+    duplicates = {name for name in listed if listed.count(name) > 1}
+    assert duplicates == set(), f"dubbel vermeld: {sorted(duplicates)}"
+
+
+def test_every_listed_test_file_actually_exists(failures_register: str) -> None:
+    """Een register dat naar verdwenen tests verwijst is stille rot."""
+    missing = set()
+    for nodeid in _listed_nodeids(failures_register):
+        path = PROJECT_ROOT / nodeid.split("::")[0]
+        if not path.exists():
+            missing.add(nodeid.split("::")[0])
+
+    assert missing == set(), f"register noemt verdwenen bestanden: {sorted(missing)}"
+
+
+def test_group_totals_add_up_to_the_overall_count(failures_register: str) -> None:
+    per_group = [int(n) for n in re.findall(r"^\*\*(\d+) tests — oordeel:", failures_register, re.M)]
+    stated = int(re.search(r"\*\*\d+ geslaagd, (\d+) gefaald", failures_register).group(1))
+
+    assert sum(per_group) == stated
+
+
+def test_register_explains_why_the_gates_stay_closed(failures_register: str) -> None:
+    lowered = failures_register.lower()
+
+    assert "veiligheidsmaatregel" in lowered
+    assert "bewust niet gedaan" in lowered
+
+
+def test_register_records_what_was_actually_fixed(failures_register: str) -> None:
+    assert "Opgelost tijdens deze audit" in failures_register
+    assert "/root/apps/Crypto/coinbase_bot" in failures_register
+    assert "_EmptyOrderStore" in failures_register

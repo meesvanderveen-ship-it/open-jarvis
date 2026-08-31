@@ -95,6 +95,16 @@ class _EmptyOrderStore:
     def open_order_counts(self):
         return {"total_open_orders": 0, "by_status": {}, "by_ticker": {}}
 
+    def all_orders(self):
+        """Ontbrak, terwijl de echte OrderStore hem wel heeft.
+
+        De code onder test loopt via `store.all_orders()`, dus deze dubbel
+        liep stuk op een AttributeError voordat de eigenlijke assertie aan bod
+        kwam. Een lege store levert een lege lijst op -- consistent met alle
+        andere methodes hieronder en met bot/order_store.py::all_orders.
+        """
+        return []
+
     def list_orders(self, *args, **kwargs):
         return []
 
