@@ -1,14 +1,14 @@
 # Testfailures: actueel register
 
-Gegenereerd uit een echte testrun. Niet met de hand bijgehouden, dus niet
-stiekem verouderd.
+Gegenereerd uit een echte testrun met `tools/build_failure_register.py`.
+Niet met de hand bijgehouden, dus niet stiekem verouderd.
 
 | | |
 |---|---|
 | Gemeten op | 2026-08-31 |
 | Python | 3.11.15 (Linux) |
 | Commando | `python -m pytest -q` |
-| Resultaat | **2759 geslaagd, 103 gefaald, 2 overgeslagen** |
+| Resultaat | **2837 geslaagd, 103 gefaald, 2 overgeslagen** |
 
 **Alle 103 failures hieronder bestonden al in de aangeleverde ZIP.**
 Er zijn geen nieuwe failures geintroduceerd. Twee failures uit de ZIP zijn
@@ -255,11 +255,9 @@ enkele test is aangepast om een groene score te halen.
 
 ## Hoe je dit register bijwerkt
 
-Draai de suite en vergelijk met de lijst hierboven:
-
 ```
-.venv\Scripts\python -m pytest -q
+.venv\Scripts\python tools\build_failure_register.py --run
 ```
 
-Elke failure die hier niet in staat, is nieuw en verdient onderzoek.
-
+Elke failure die na een run niet in dit bestand staat, is nieuw en verdient
+onderzoek voordat je hem als bekend afdoet.
