@@ -353,3 +353,83 @@ def test_status_reports_cooldown_while_the_supervisor_waits(tmp_path: Path) -> N
 
     assert status["state"] == supervisor_module.STATUS_COOLDOWN
     assert "wacht" in status["supervisor"]["message"]
+
+
+# --------------------------------------------------------------------------
+# Echte processen: een afgesloten kind mag nooit als "draait" gelezen worden
+# --------------------------------------------------------------------------
+
+
+def test_a_finished_child_is_not_reported_as_alive() -> None:
+    """Op POSIX blijft een afgesloten kind als zombie in de proceslijst staan.
+
+    Een zombie beantwoordt signaal 0 nog gewoon, dus de kale kill(pid, 0)-check
+    las hem als levend. Gevolg: de statusvraag meldde "JARVIS draait" voor een
+    bot die met een foutcode gestopt was, en de Start-knop in de extensie bleef
+    uitgeschakeld. Dit is de gevaarlijke kant om je in te vergissen.
+    """
+    import subprocess
+    import sys
+    import time
+
+    from control_service import process_manager
+
+    child = subprocess.Popen([sys.executable, "-c", "raise SystemExit(4)"])
+    process_manager._SPAWNED[child.pid] = child
+    try:
+        deadline = time.monotonic() + 10
+        while child.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+
+        assert process_manager._pid_alive(child.pid) is False
+    finally:
+        process_manager._SPAWNED.pop(child.pid, None)
+        child.wait()
+
+
+def test_a_running_child_is_reported_as_alive() -> None:
+    """Tegenhanger: de fix mag een draaiend proces niet dood verklaren."""
+    import subprocess
+    import sys
+
+    from control_service import process_manager
+
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    process_manager._SPAWNED[child.pid] = child
+    try:
+        assert process_manager._pid_alive(child.pid) is True
+    finally:
+        process_manager._SPAWNED.pop(child.pid, None)
+        child.kill()
+        child.wait()
+
+
+def test_a_pid_that_never_existed_is_not_alive() -> None:
+    from control_service import process_manager
+
+    assert process_manager._pid_alive(0) is False
+    assert process_manager._pid_alive(-1) is False
+
+
+def test_the_real_spawner_registers_the_child_so_it_can_be_reaped(tmp_path: Path) -> None:
+    """Zonder deze administratie kan _pid_alive de zombie niet opruimen."""
+    import sys
+    import time
+
+    from control_service import process_manager
+
+    pid = process_manager._spawn_supervisor([sys.executable, "-c", "raise SystemExit(0)"], tmp_path)
+    try:
+        assert pid in process_manager._SPAWNED
+
+        deadline = time.monotonic() + 10
+        while process_manager._pid_alive(pid) and time.monotonic() < deadline:
+            time.sleep(0.05)
+
+        assert process_manager._pid_alive(pid) is False
+        assert pid not in process_manager._SPAWNED, "de administratie loopt niet vol"
+    finally:
+        child = process_manager._SPAWNED.pop(pid, None)
+        if child is not None:
+            child.kill()
+            child.wait()

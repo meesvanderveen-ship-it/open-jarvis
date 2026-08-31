@@ -56,17 +56,54 @@ class ActionResult:
         }
 
 
-def _pid_alive(pid: int) -> bool:
-    """Draait er een proces met dit pid?
+#: Kindprocessen die deze service zelf gestart heeft, op pid.
+#:
+#: Nodig om ze te kunnen *opruimen*. Op POSIX blijft een afgesloten kindproces
+#: als zombie in de proceslijst staan tot de ouder zijn afsluitcode ophaalt, en
+#: een zombie beantwoordt signaal 0 nog gewoon. Zonder deze administratie
+#: meldde de statusvraag daardoor "JARVIS draait" voor een bot die allang
+#: gestopt was -- precies de verkeerde kant om te vergissen, want de
+#: Start-knop in de extensie blijft dan uitgeschakeld.
+_SPAWNED: dict[int, subprocess.Popen] = {}
 
-    Op POSIX is signaal 0 de standaardmanier om dat te vragen. Op Windows
-    bestaat dat niet: daar wordt via de Win32-API een handle geopend en meteen
-    weer gesloten. ``tasklist`` aanroepen zou hier ook kunnen, maar dat start
-    een proces per statusvraag en de extension vraagt de status elke paar
-    seconden op.
+
+def _is_zombie(pid: int) -> bool:
+    """Staat dit pid als zombie in /proc? Alleen zinvol op Linux.
+
+    Vangt het geval af waarin het kind door een eerdere incarnatie van deze
+    service gestart is en dus niet in ``_SPAWNED`` staat.
+    """
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8") as handle:
+            # Het procesnaamveld staat tussen haakjes en mag spaties bevatten,
+            # dus splitsen na de sluithaak in plaats van op het derde veld.
+            return handle.read().split(") ", 1)[1].split()[0] == "Z"
+    except (OSError, IndexError):
+        return False
+
+
+def _pid_alive(pid: int) -> bool:
+    """Draait er echt nog een proces met dit pid?
+
+    Op Windows via de Win32-API: een handle openen en de afsluitcode opvragen.
+    ``tasklist`` zou ook kunnen, maar dat start een proces per statusvraag en
+    de extensie vraagt de status elke paar seconden op.
+
+    Op POSIX is signaal 0 het gebruikelijke antwoord, maar niet het hele
+    antwoord: een zombie beantwoordt dat signaal nog steeds. Daarom eerst het
+    kind opruimen als het van ons is, en anders /proc raadplegen.
     """
     if pid <= 0:
         return False
+
+    child = _SPAWNED.get(pid)
+    if child is not None:
+        # poll() haalt de afsluitcode op en ruimt daarmee de zombie op.
+        if child.poll() is not None:
+            _SPAWNED.pop(pid, None)
+            return False
+        return True
+
     if os.name == "nt":  # pragma: no cover - alleen op Windows te testen
         import ctypes
 
@@ -83,6 +120,18 @@ def _pid_alive(pid: int) -> bool:
             return code.value == STILL_ACTIVE
         finally:
             kernel32.CloseHandle(handle)
+
+    try:
+        # Een kind van een eerdere incarnatie: alsnog proberen op te ruimen.
+        reaped, _status = os.waitpid(pid, os.WNOHANG)
+        if reaped == pid:
+            return False
+    except (ChildProcessError, OSError):
+        pass  # Niet ons kind; dat is geen fout.
+
+    if _is_zombie(pid):
+        return False
+
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -369,4 +418,8 @@ def _spawn_supervisor(command: list[str], cwd: Path) -> int:
         )
     else:
         kwargs["start_new_session"] = True
-    return subprocess.Popen(command, **kwargs).pid
+    child = subprocess.Popen(command, **kwargs)
+    # Bijhouden zodat _pid_alive het proces kan opruimen zodra het stopt; een
+    # niet-opgeruimd kind blijft anders als zombie "levend" lijken.
+    _SPAWNED[child.pid] = child
+    return child.pid
