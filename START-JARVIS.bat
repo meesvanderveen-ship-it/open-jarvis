@@ -76,7 +76,12 @@ if "%PREFLIGHT%"=="1" (
     echo Sleutels opnieuw controleren...
     echo.
     "%VENV_PY%" -m tools.setup_wizard --check --online
-    set "PREFLIGHT=%errorlevel%"
+    REM !errorlevel! en niet %errorlevel%: cmd.exe leest een heel haakjesblok
+    REM in een keer en vult daarbij alle %VAR% meteen in. Met %errorlevel%
+    REM kreeg PREFLIGHT dus de waarde van voor dit blok -- altijd 1, want dat
+    REM maakte de if hierboven waar. Wie zijn sleutels zojuist succesvol had
+    REM gekoppeld, kreeg daardoor alsnog "Nog steeds niet startklaar".
+    set "PREFLIGHT=!errorlevel!"
     if "!PREFLIGHT!"=="1" (
         echo.
         echo ------------------------------------------------------------

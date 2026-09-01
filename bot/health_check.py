@@ -26,12 +26,22 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import logging
 import os
 import socket
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
+
+LOGGER = logging.getLogger("jarvis.health")
+# Zonder handler valt Python terug op logging.lastResort, en die drukt alles
+# vanaf WARNING mét traceback naar stderr. Dan zou een afgevangen fout alsnog
+# als traceback op het scherm van de gebruiker belanden -- precies wat deze
+# module wil voorkomen. Een NullHandler zet die noodroute uit; een programma
+# dat zelf logging inricht (de control-service doet dat) vangt de melding
+# gewoon op via de root logger.
+LOGGER.addHandler(logging.NullHandler())
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -431,24 +441,55 @@ def check_dashboard_build(root: Optional[Path] = None) -> HealthResult:
 # --------------------------------------------------------------------------
 
 
+def _isolated(component: str, check: Callable[[], Any]) -> list[HealthResult]:
+    """Voer één controle uit en laat hem nooit de hele systeemcontrole meeslepen.
+
+    Dit is geen brede except die fouten wegmoffelt: een onverwachte fout wordt
+    juist als ERROR-regel getoond, met het type erbij, en telt gewoon mee voor
+    de eindtoestand en de afsluitcode. Wat hij voorkomt is dat de gebruiker een
+    kale Python-traceback op zijn scherm krijgt in plaats van een overzicht --
+    precies waar deze systeemcontrole voor bestaat. Een ontbrekende submodule
+    liet anders `python -m bot.health_check` met een ImportError afbreken,
+    zonder één regel over wat er wél goed staat.
+    """
+    try:
+        uitkomst = check()
+    except Exception as exc:  # noqa: BLE001 -- zie de uitleg hierboven
+        LOGGER.exception("Controle %s is zelf omgevallen.", component)
+        return [
+            HealthResult(
+                component,
+                ERROR,
+                "Deze controle kon niet uitgevoerd worden.",
+                detail=f"{type(exc).__name__}: {exc}",
+                advice="Draai DIAGNOSE-JARVIS.bat; als dit blijft terugkomen is de installatie onvolledig.",
+            )
+        ]
+    if isinstance(uitkomst, HealthResult):
+        return [uitkomst]
+    return list(uitkomst)
+
+
 def run_health_check(*, online: bool = False, root: Optional[Path] = None) -> dict[str, Any]:
     """Voer alle controles uit en vat ze samen.
 
     ``online=False`` (standaard) doet geen enkel netwerkverzoek naar een
     provider en is dus altijd veilig en snel.
     """
-    results: list[HealthResult] = [
-        check_python(),
-        check_dependencies(),
-        check_backend_dependencies(),
-        check_configuration(root),
-        *check_credentials(online=online),
-        check_trading_engine(),
-        check_dashboard_build(root),
-        check_local_backend(),
-        check_control_service(),
-        check_chrome_extension(root),
-    ]
+    results: list[HealthResult] = []
+    for component, check in (
+        ("Python", check_python),
+        ("Dependencies", check_dependencies),
+        ("Dashboard-pakketten", check_backend_dependencies),
+        ("Configuratie", lambda: check_configuration(root)),
+        ("API-sleutels", lambda: check_credentials(online=online)),
+        ("Trading engine", check_trading_engine),
+        ("Dashboard-build", lambda: check_dashboard_build(root)),
+        ("Dashboard", check_local_backend),
+        ("Control-service", check_control_service),
+        ("Chrome Extension", lambda: check_chrome_extension(root)),
+    ):
+        results.extend(_isolated(component, check))
 
     overall = worst_status(results)
     return {
@@ -498,7 +539,17 @@ EXIT_CODES = {READY: 0, WARNING: 0, OFFLINE: 2, ERROR: 1}
 
 def main(argv: Optional[list[str]] = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
-    report = run_health_check(online="--online" in args)
+    try:
+        report = run_health_check(online="--online" in args)
+    except Exception as exc:  # noqa: BLE001 -- laatste vangnet, zie hieronder
+        # De losse controles zijn al afzonderlijk afgeschermd; komt er hier tóch
+        # iets doorheen, dan is een leesbare regel nog altijd beter dan een
+        # traceback in het opstartvenster van iemand zonder programmeerkennis.
+        # De afsluitcode blijft 1, dus START-JARVIS.bat stopt gewoon.
+        print("De systeemcontrole kon niet worden uitgevoerd.", file=sys.stderr)
+        print(f"Technische melding: {type(exc).__name__}: {exc}", file=sys.stderr)
+        print("Draai DIAGNOSE-JARVIS.bat voor een volledige controle.", file=sys.stderr)
+        return EXIT_CODES[ERROR]
     if "--json" in args:
         print(json.dumps(report, indent=2, sort_keys=True, ensure_ascii=True))
     else:

@@ -22,9 +22,17 @@ def _default_follower_paths() -> tuple[str, ...]:
     override = (os.environ.get("FOLLOWER_RECEIVER_PATHS") or "").strip()
     if override:
         return tuple(part for part in override.split(os.pathsep) if part.strip())
-    return ("/opt/coinbase-replica", "/root/apps/Crypto/coinbase-replica")
+    return FALLBACK_FOLLOWER_PATHS
 
 
+#: De bekende Linux-serverlocaties. Blijven de standaard, zodat bestaande
+#: deployments niets merken van de instelbaarheid hierboven.
+FALLBACK_FOLLOWER_PATHS = ("/opt/coinbase-replica", "/root/apps/Crypto/coinbase-replica")
+
+#: Bewaard omdat de naam elders bekend kan zijn. Let op: dit is een momentopname
+#: van het importmoment. Code die de instelling uit .env moet respecteren roept
+#: _default_follower_paths() aan, want .env wordt door bot.config pas bij import
+#: geladen en die volgorde is niet gegarandeerd.
 DEFAULT_FOLLOWER_PATHS = _default_follower_paths()
 TEXT_SUFFIXES = {".py", ".md", ".txt", ".toml", ".yaml", ".yml", ".json", ".ini", ".cfg"}
 ROUTE_RE = re.compile(
@@ -64,7 +72,12 @@ def _read_text(path: Path) -> str:
 
 def _candidate_paths(root: Path, follower_paths: Optional[Sequence[str | Path]]) -> List[Path]:
     paths = [root / "replication"]
-    explicit = list(follower_paths) if follower_paths is not None else list(DEFAULT_FOLLOWER_PATHS)
+    # _default_follower_paths() en niet DEFAULT_FOLLOWER_PATHS: die constante is
+    # op het importmoment vastgezet, dus een FOLLOWER_RECEIVER_PATHS uit .env
+    # werkte alleen als die toevallig al in de omgeving stond voordat deze
+    # module geimporteerd werd. De instelling stond wel gedocumenteerd maar deed
+    # dan niets.
+    explicit = list(follower_paths) if follower_paths is not None else list(_default_follower_paths())
     paths.extend(Path(path) for path in explicit)
     sibling_root = root.parent
     try:

@@ -445,6 +445,39 @@ def test_follower_paths_can_be_overridden(monkeypatch):
     assert module._default_follower_paths() == (first, second)
 
 
+def test_the_override_actually_reaches_the_code_that_searches(tmp_path, monkeypatch):
+    """De instelling moet doorwerken in de functie die de paden echt gebruikt.
+
+    Eerder las die functie de constante DEFAULT_FOLLOWER_PATHS, die op het
+    importmoment wordt vastgezet. Een FOLLOWER_RECEIVER_PATHS uit .env werkte
+    daardoor alleen als hij toevallig al in de omgeving stond voordat de module
+    geimporteerd werd -- de instelling stond wel gedocumenteerd maar deed niets.
+    Deze test gaat bewust langs de productiefunctie en niet langs de helper.
+    """
+    from bot import phase_follower_receiver_api_audit as module
+
+    doel = tmp_path / "elders" / "replica"
+    doel.mkdir(parents=True)
+    monkeypatch.setenv("FOLLOWER_RECEIVER_PATHS", str(doel))
+
+    gevonden = module._candidate_paths(tmp_path / "project", None)
+
+    assert doel in gevonden, "de ingestelde map wordt niet doorzocht"
+    assert Path("/opt/coinbase-replica") not in gevonden, "de standaard wordt niet vervangen"
+
+
+def test_without_an_override_the_known_server_paths_are_searched(tmp_path, monkeypatch):
+    """Bestaande Linux-deployments mogen niets merken van de instelbaarheid."""
+    from bot import phase_follower_receiver_api_audit as module
+
+    monkeypatch.delenv("FOLLOWER_RECEIVER_PATHS", raising=False)
+
+    gevonden = module._candidate_paths(tmp_path / "project", None)
+
+    for standaard in module.FALLBACK_FOLLOWER_PATHS:
+        assert Path(standaard) in gevonden
+
+
 def test_follower_paths_survive_an_empty_or_padded_value(monkeypatch):
     from bot import phase_follower_receiver_api_audit as module
 
@@ -461,3 +494,85 @@ def test_missing_replica_directories_are_not_an_error():
 
     for path in module._default_follower_paths():
         assert isinstance(path, str) and path
+
+
+# --------------------------------------------------------------------------
+# cmd.exe-valkuilen in de batchbestanden
+# --------------------------------------------------------------------------
+
+
+def _blocks_and_lines(path: Path):
+    """Loop de regels langs met de haakjesdiepte erbij.
+
+    Commentaarregels tellen niet mee voor de inhoud, maar hun haakjes wel
+    niet: `REM ... ^(EN^)` zou de diepte anders scheeftrekken.
+    """
+    text = path.read_text(encoding="utf-8", errors="replace").replace("\r\n", "\n")
+    depth = 0
+    for number, raw in enumerate(text.split("\n"), 1):
+        stripped = raw.strip()
+        is_comment = stripped.upper().startswith("REM") or stripped.startswith("::")
+        yield number, stripped, depth, is_comment
+        if not is_comment:
+            depth = max(0, depth + stripped.count("(") - stripped.count(")"))
+
+
+@pytest.mark.parametrize("path", _bat_files(), ids=lambda p: p.name)
+def test_no_percent_errorlevel_inside_a_parenthesised_block(path: Path):
+    """`set "VAR=%errorlevel%"` binnen een blok leest de verkeerde waarde.
+
+    cmd.exe parseert een heel haakjesblok in een keer en vult daarbij alle
+    %VAR% in. `%errorlevel%` wordt dus vervangen door de waarde van *voordat*
+    het blok begon, niet door die van het commando ervoor.
+
+    Dit was een echte bug in START-JARVIS.bat: na een geslaagde
+    sleutelkoppeling kreeg de gebruiker alsnog "Nog steeds niet startklaar"
+    en stopte het script. Binnen een blok hoort `!errorlevel!` te staan.
+    """
+    fouten = [
+        (number, line)
+        for number, line, depth, is_comment in _blocks_and_lines(path)
+        if depth > 0 and not is_comment and re.search(r'set "?\w+=%errorlevel%', line, re.I)
+    ]
+
+    assert fouten == [], f"{path.name}: gebruik !errorlevel! binnen een blok, niet %errorlevel% -> {fouten}"
+
+
+@pytest.mark.parametrize("path", _bat_files(), ids=lambda p: p.name)
+def test_every_goto_and_call_target_exists(path: Path):
+    """Een sprong naar een onbekend label laat cmd.exe stilletjes afbreken."""
+    text = path.read_text(encoding="utf-8", errors="replace").replace("\r\n", "\n")
+    labels = {match.lower() for match in re.findall(r"^:(\w[\w-]*)", text, re.M)}
+
+    onbekend = {
+        target
+        for target in re.findall(r"\b(?:goto|call)\s+:(\w[\w-]*)", text, re.I)
+        if target.lower() not in labels and target.lower() != "eof"
+    }
+
+    assert onbekend == set(), f"{path.name} springt naar niet-bestaande labels: {sorted(onbekend)}"
+
+
+@pytest.mark.parametrize("path", _bat_files(), ids=lambda p: p.name)
+def test_no_bare_exit_that_closes_the_users_window(path: Path):
+    """Een kale `exit` sluit het hele venster, ook als het script gecalld is.
+
+    Dan is de foutmelding die er net in stond weg voordat iemand hem kon lezen.
+    """
+    kaal = [
+        number
+        for number, line, _depth, is_comment in _blocks_and_lines(path)
+        if not is_comment and re.fullmatch(r"exit", line, re.I)
+    ]
+
+    assert kaal == [], f"{path.name}: gebruik 'exit /b' op regel(s) {kaal}"
+
+
+def test_delayed_expansion_is_enabled_where_it_is_used():
+    """`!VAR!` werkt alleen na `setlocal enabledelayedexpansion`."""
+    for path in _bat_files():
+        text = path.read_text(encoding="utf-8", errors="replace")
+        if re.search(r"![A-Za-z_]\w*!", text):
+            assert "enabledelayedexpansion" in text.lower(), (
+                f"{path.name} gebruikt !VAR! zonder delayed expansion aan te zetten"
+            )

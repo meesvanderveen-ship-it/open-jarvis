@@ -313,3 +313,79 @@ def test_main_json_output_parses(capsys: pytest.CaptureFixture[str]) -> None:
 
     payload = json.loads(capsys.readouterr().out)
     assert "checks" in payload
+
+
+# --------------------------------------------------------------------------
+# Een omvallende deelcontrole mag nooit een traceback opleveren
+# --------------------------------------------------------------------------
+
+
+def test_a_crashing_sub_check_becomes_an_error_row_not_a_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """De systeemcontrole is het enige venster van een niet-programmeur.
+
+    Viel een deelcontrole om -- bijvoorbeeld door een ontbrekende submodule --
+    dan brak `python -m bot.health_check` af met een ImportError, zonder een
+    enkele regel over wat er wel goed stond. Dat is precies de obscure
+    traceback die deze laag hoort weg te nemen.
+    """
+
+    def explodeert():
+        raise ImportError("geen module control_service")
+
+    monkeypatch.setattr(hc, "check_control_service", explodeert)
+
+    report = hc.run_health_check(online=False)
+
+    rij = next(c for c in report["checks"] if c["component"] == "Control-service")
+    assert rij["status"] == hc.ERROR
+    assert "ImportError" in rij["detail"]
+    assert rij["advice"], "een fout moet altijd een volgende stap noemen"
+
+
+def test_the_other_checks_still_run_when_one_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Eén kapotte controle mag de negen andere niet onzichtbaar maken."""
+
+    def explodeert():
+        raise RuntimeError("iets onverwachts")
+
+    monkeypatch.setattr(hc, "check_trading_engine", explodeert)
+
+    report = hc.run_health_check(online=False)
+
+    assert len(report["checks"]) >= 10
+    assert any(c["component"] == "Python" and c["status"] == hc.READY for c in report["checks"])
+
+
+def test_a_failing_check_still_blocks_the_start(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Afschermen mag geen wegmoffelen worden: de fout telt gewoon mee."""
+
+    def explodeert():
+        raise RuntimeError("stuk")
+
+    monkeypatch.setattr(hc, "check_dependencies", explodeert)
+
+    report = hc.run_health_check(online=False)
+
+    assert report["overall"] == hc.ERROR
+    assert report["ready"] is False
+    assert "Dependencies" in report["blocking"]
+
+
+def test_main_prints_a_readable_line_instead_of_a_traceback(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Laatste vangnet, voor het geval er toch iets doorheen komt."""
+
+    def explodeert(**_kwargs):
+        raise RuntimeError("onverwacht")
+
+    monkeypatch.setattr(hc, "run_health_check", explodeert)
+
+    code = hc.main([])
+
+    uitvoer = capsys.readouterr()
+    assert code == hc.EXIT_CODES[hc.ERROR]
+    assert "Traceback" not in uitvoer.err
+    assert "DIAGNOSE-JARVIS.bat" in uitvoer.err

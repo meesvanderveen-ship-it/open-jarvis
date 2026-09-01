@@ -8,7 +8,7 @@ Niet met de hand bijgehouden, dus niet stiekem verouderd.
 | Gemeten op | 2026-09-01 |
 | Python | 3.11.15 (Linux) |
 | Commando | `python -m pytest -q` |
-| Resultaat | **2846 geslaagd, 103 gefaald, 2 overgeslagen** |
+| Resultaat | **2883 geslaagd, 103 gefaald, 2 overgeslagen** |
 
 **Alle 103 failures hieronder bestonden al in de aangeleverde ZIP.**
 Er zijn geen nieuwe failures geintroduceerd. Twee failures uit de ZIP zijn
