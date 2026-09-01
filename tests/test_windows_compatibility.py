@@ -413,3 +413,51 @@ def test_batch_files_only_call_test_files_that_exist():
         for reference in pattern.findall(path.read_text(encoding="utf-8")):
             target = PROJECT_ROOT / reference.replace("\\", "/")
             assert target.exists(), f"{path.name} verwijst naar {reference}, dat niet bestaat"
+
+
+# --------------------------------------------------------------------------
+# Overschrijfbare zoekpaden voor de optionele replica-installatie
+# --------------------------------------------------------------------------
+
+
+def test_follower_paths_default_to_the_known_server_locations():
+    """De twee Linux-serverpaden blijven de standaard.
+
+    Ze stonden eerst hard in de code. Nu zijn het defaults van een
+    overschrijfbare zoeklijst: bestaande deployments merken niets, en op een
+    Windows-pc kan iemand aanwijzen waar de replica wél staat.
+    """
+    from bot import phase_follower_receiver_api_audit as module
+
+    assert module._default_follower_paths() == (
+        "/opt/coinbase-replica",
+        "/root/apps/Crypto/coinbase-replica",
+    )
+
+
+def test_follower_paths_can_be_overridden(monkeypatch):
+    """Gescheiden met os.pathsep: ';' op Windows, ':' op POSIX."""
+    from bot import phase_follower_receiver_api_audit as module
+
+    first, second = ("C:\\JARVIS\\replica", "D:\\reserve") if os.name == "nt" else ("/srv/replica", "/mnt/reserve")
+    monkeypatch.setenv("FOLLOWER_RECEIVER_PATHS", f"{first}{os.pathsep}{second}")
+
+    assert module._default_follower_paths() == (first, second)
+
+
+def test_follower_paths_survive_an_empty_or_padded_value(monkeypatch):
+    from bot import phase_follower_receiver_api_audit as module
+
+    monkeypatch.setenv("FOLLOWER_RECEIVER_PATHS", "   ")
+    assert module._default_follower_paths()[0] == "/opt/coinbase-replica"
+
+    monkeypatch.setenv("FOLLOWER_RECEIVER_PATHS", f"/een{os.pathsep}{os.pathsep}/twee")
+    assert module._default_follower_paths() == ("/een", "/twee"), "lege stukken worden overgeslagen"
+
+
+def test_missing_replica_directories_are_not_an_error():
+    """Op een Windows-pc bestaat geen van beide paden; dat mag niets breken."""
+    from bot import phase_follower_receiver_api_audit as module
+
+    for path in module._default_follower_paths():
+        assert isinstance(path, str) and path
