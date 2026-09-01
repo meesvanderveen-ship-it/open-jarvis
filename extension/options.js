@@ -6,7 +6,16 @@
  * het alsof de bot zelf stuk is.
  */
 
-import { DEFAULT_BASE_URL, ERROR, OFFLINE, OK, UNAUTHORIZED, getStatus, loadSettings, saveSettings } from './api.js';
+import {
+  DEFAULT_BASE_URL,
+  OFFLINE,
+  OK,
+  UNAUTHORIZED,
+  getHealth,
+  getStatus,
+  loadSettings,
+  saveSettings,
+} from './api.js';
 
 const el = (id) => document.getElementById(id);
 
@@ -48,6 +57,16 @@ async function test() {
   }
 
   show('Verbinding testen…', 'busy');
+
+  // Eerst zonder sleutel vragen of de dienst überhaupt luistert. Anders krijgt
+  // iemand die JARVIS simpelweg niet gestart heeft te horen dat zijn sleutel
+  // niet klopt, en gaat hij een probleem oplossen dat er niet is.
+  const health = await getHealth();
+  if (health.kind === OFFLINE) {
+    show(`${health.message} ${health.advice}`, 'warn');
+    return;
+  }
+
   const result = await getStatus();
 
   if (result.kind === OK) {
@@ -60,7 +79,8 @@ async function test() {
     return;
   }
   if (result.kind === UNAUTHORIZED) {
-    show(`${result.message} ${result.advice}`, 'bad');
+    // De dienst antwoordde wel, dus dit gaat echt over de sleutel.
+    show(`De achtergronddienst draait, maar accepteert deze sleutel niet. ${result.advice}`, 'bad');
     return;
   }
   show(result.message || 'Onbekende fout.', 'bad');

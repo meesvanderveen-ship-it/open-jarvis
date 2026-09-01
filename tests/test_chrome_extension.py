@@ -150,3 +150,56 @@ def test_popup_explains_that_validation_places_no_trades() -> None:
     text = (EXTENSION_DIR / "popup.html").read_text(encoding="utf-8")
 
     assert "niets gekocht of verkocht" in text
+
+
+# --------------------------------------------------------------------------
+# Gecontroleerd herstel in de extensie
+# --------------------------------------------------------------------------
+
+
+def test_get_requests_are_retried_before_declaring_the_service_dead() -> None:
+    """Eén hapering mag niet als "JARVIS draait niet" gepresenteerd worden.
+
+    De service kan net opstarten, of de eerste aanroep kan traag zijn doordat
+    de handelsmotor nog geladen moet worden. Zonder herhaling krijgt de
+    gebruiker dan de verkeerde conclusie te zien -- dezelfde fout die de
+    Python-kant met retries en backoff juist vermijdt.
+    """
+    text = (EXTENSION_DIR / "api.js").read_text(encoding="utf-8")
+
+    assert "GET_RETRIES" in text
+    assert "RETRY_DELAYS_MS" in text
+    assert "attempt <= GET_RETRIES" in text or "attempt < attempts" in text
+
+
+def test_state_changing_requests_are_never_retried() -> None:
+    """Een herhaald startverzoek zou een tweede bot kunnen starten."""
+    text = (EXTENSION_DIR / "api.js").read_text(encoding="utf-8")
+
+    assert "method === 'GET' ? GET_RETRIES + 1 : 1" in text, (
+        "alleen opvragingen mogen herhaald worden"
+    )
+
+
+def test_retry_delays_increase() -> None:
+    text = (EXTENSION_DIR / "api.js").read_text(encoding="utf-8")
+
+    delays = re.search(r"RETRY_DELAYS_MS = \[([^\]]+)\]", text)
+    assert delays, "geen wachttijden gevonden"
+    values = [int(part.strip()) for part in delays.group(1).split(",")]
+    assert values == sorted(values) and len(set(values)) > 1, "de wachttijd loopt niet op"
+
+
+def test_the_health_probe_is_actually_used() -> None:
+    """Zonder gebruiker was getHealth dode code met een misleidend doel."""
+    options = (EXTENSION_DIR / "options.js").read_text(encoding="utf-8")
+
+    assert "getHealth" in options
+
+
+def test_options_page_separates_a_dead_service_from_a_bad_key() -> None:
+    """Wie JARVIS niet gestart heeft, mag niet horen dat zijn sleutel fout is."""
+    text = (EXTENSION_DIR / "options.js").read_text(encoding="utf-8")
+
+    assert "const health = await getHealth();" in text
+    assert "draait, maar accepteert deze sleutel niet" in text

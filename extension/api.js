@@ -27,6 +27,25 @@ const REQUEST_TIMEOUT_MS = 8000;
 /** Stoppen kan een lopende handelscyclus moeten afwachten. */
 const SLOW_REQUEST_TIMEOUT_MS = 60000;
 
+/**
+ * Hoe vaak een *opvraging* opnieuw geprobeerd wordt voordat we concluderen dat
+ * de achtergronddienst niet draait.
+ *
+ * Zonder dit vertelt één hapering -- de service die net opstart, een trage
+ * eerste aanroep waarin de handelsmotor nog geladen moet worden, een browser
+ * die de verbinding afknijpt -- de gebruiker meteen dat JARVIS niet draait.
+ * Dat is precies de verkeerde conclusie, en dezelfde fout die de backend aan
+ * de Python-kant met retries en backoff vermijdt.
+ *
+ * Alleen voor GET. Een start-, stop- of herstartverzoek wordt NOOIT herhaald:
+ * een tweede poging zou een tweede bot kunnen starten, en dat is het ergste
+ * wat hier kan gebeuren.
+ */
+const GET_RETRIES = 2;
+const RETRY_DELAYS_MS = [300, 900];
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 export async function loadSettings() {
   const stored = await chrome.storage.local.get(['baseUrl', 'token']);
   return {
@@ -57,31 +76,47 @@ export async function call(path, { method = 'GET', slow = false } = {}) {
     };
   }
 
-  const controller = new AbortController();
-  const timeout = setTimeout(
-    () => controller.abort(),
-    slow ? SLOW_REQUEST_TIMEOUT_MS : REQUEST_TIMEOUT_MS,
-  );
-
+  // Alleen opvragingen mogen herhaald worden; zie GET_RETRIES.
+  const attempts = method === 'GET' ? GET_RETRIES + 1 : 1;
   let response;
-  try {
-    response = await fetch(`${baseUrl}${API_PREFIX}${path}`, {
-      method,
-      headers: { Authorization: `Bearer ${token}` },
-      signal: controller.signal,
-    });
-  } catch (error) {
-    // Een mislukte fetch naar 127.0.0.1 betekent vrijwel altijd: er luistert
-    // niets. Dat is iets anders dan een verkeerde sleutel, en dat verschil
-    // moet de gebruiker te zien krijgen.
+  let lastError;
+
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    if (attempt > 0) {
+      await sleep(RETRY_DELAYS_MS[attempt - 1] ?? RETRY_DELAYS_MS[RETRY_DELAYS_MS.length - 1]);
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(
+      () => controller.abort(),
+      slow ? SLOW_REQUEST_TIMEOUT_MS : REQUEST_TIMEOUT_MS,
+    );
+    try {
+      response = await fetch(`${baseUrl}${API_PREFIX}${path}`, {
+        method,
+        headers: { Authorization: `Bearer ${token}` },
+        signal: controller.signal,
+      });
+      lastError = null;
+      break;
+    } catch (error) {
+      lastError = error;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  if (lastError) {
+    // Pas na alle pogingen concluderen dat er niets luistert. Dat is iets
+    // anders dan een verkeerde sleutel, en dat verschil moet de gebruiker
+    // te zien krijgen.
     return {
       kind: OFFLINE,
       message: 'JARVIS draait nu niet op deze pc.',
       advice: `De achtergronddienst op ${baseUrl} antwoordt niet. Start JARVIS met START-JARVIS.bat.`,
-      cause: error && error.name === 'AbortError' ? 'timeout' : 'geen verbinding',
+      cause: lastError && lastError.name === 'AbortError' ? 'timeout' : 'geen verbinding',
+      attempts,
     };
-  } finally {
-    clearTimeout(timeout);
   }
 
   let body = null;
@@ -114,27 +149,48 @@ export async function call(path, { method = 'GET', slow = false } = {}) {
   return { kind: OK, body };
 }
 
+/**
+ * Draait de achtergronddienst überhaupt?
+ *
+ * /health vraagt geen sleutel. Daardoor kan de extensie "de dienst ligt eruit"
+ * onderscheiden van "je sleutel klopt niet" -- óók als er nog helemaal geen
+ * sleutel ingesteld is. Zonder dit onderscheid krijgt iemand die de dienst
+ * niet gestart heeft te horen dat zijn sleutel verkeerd is, en gaat hij een
+ * probleem oplossen dat er niet is.
+ */
 export const getHealth = async () => {
-  // /health heeft geen sleutel nodig; zo kan de extensie 'draait de service'
-  // onderscheiden van 'sleutel klopt niet', ook als er nog niets ingesteld is.
   const { baseUrl } = await loadSettings();
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-  try {
-    const response = await fetch(`${baseUrl}${API_PREFIX}/health`, { signal: controller.signal });
-    if (!response.ok) {
-      return { kind: ERROR, status: response.status, message: 'De service antwoordt, maar niet goed.' };
+  let response;
+  let lastError;
+
+  for (let attempt = 0; attempt <= GET_RETRIES; attempt += 1) {
+    if (attempt > 0) {
+      await sleep(RETRY_DELAYS_MS[attempt - 1] ?? RETRY_DELAYS_MS[RETRY_DELAYS_MS.length - 1]);
     }
-    return { kind: OK, body: await response.json() };
-  } catch (error) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    try {
+      response = await fetch(`${baseUrl}${API_PREFIX}/health`, { signal: controller.signal });
+      lastError = null;
+      break;
+    } catch (error) {
+      lastError = error;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  if (lastError) {
     return {
       kind: OFFLINE,
       message: 'JARVIS draait nu niet op deze pc.',
       advice: `De achtergronddienst op ${baseUrl} antwoordt niet. Start JARVIS met START-JARVIS.bat.`,
     };
-  } finally {
-    clearTimeout(timeout);
   }
+  if (!response.ok) {
+    return { kind: ERROR, status: response.status, message: 'De service antwoordt, maar niet goed.' };
+  }
+  return { kind: OK, body: await response.json() };
 };
 
 export const getStatus = () => call('/status');
