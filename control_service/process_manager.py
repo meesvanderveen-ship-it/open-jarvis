@@ -32,6 +32,9 @@ LOGGER = logging.getLogger("jarvis.control.process")
 STOP_TIMEOUT_SECONDS = 45.0
 #: Hoe lang er gewacht wordt tot de supervisor zichzelf 'running' meldt.
 START_TIMEOUT_SECONDS = 20.0
+#: Hoe lang er na "running" nog gekeken wordt of hij ook blijft draaien.
+#: Een bot die afslaat op een ontbrekende sleutel doet dat binnen een seconde.
+SETTLE_SECONDS = 3.0
 _POLL_INTERVAL = 0.5
 
 
@@ -158,6 +161,7 @@ class ProcessManager:
         pid_alive: Optional[Callable[[int], bool]] = None,
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
+        settle_seconds: float = SETTLE_SECONDS,
     ) -> None:
         self.project_root = project_root or config.PROJECT_ROOT
         self.pid_path = pid_path or config.SUPERVISOR_PID_PATH
@@ -167,6 +171,7 @@ class ProcessManager:
         self._pid_alive = pid_alive or _pid_alive
         self._sleep = sleep
         self._clock = clock
+        self.settle_seconds = settle_seconds
 
     # -- pid-bestand ------------------------------------------------------
 
@@ -290,6 +295,15 @@ class ProcessManager:
             published = supervisor_module.read_status(self.status_path)
             state = published.get("state")
             if state == supervisor_module.STATUS_RUNNING:
+                # Nog even kijken of hij blijft draaien. De bewaker meldt
+                # "running" zodra hij de bot gestart heeft, maar een bot die
+                # meteen afslaat op een ontbrekende sleutel is er een seconde
+                # later alweer niet. Zonder deze bevestiging meldde start()
+                # "JARVIS is gestart" voor een bot die al gestopt was, en
+                # opende START-JARVIS.bat vrolijk de browser.
+                bevestigd = self._settled(pid)
+                if bevestigd is not None:
+                    return bevestigd
                 return ActionResult(
                     ok=True, action="start", state=state, message="JARVIS is gestart."
                 )
@@ -323,6 +337,41 @@ class ProcessManager:
             message="JARVIS is aan het opstarten.",
             detail="Het opstarten duurt langer dan gebruikelijk. Ververs de status over een halve minuut.",
         )
+
+    def _settled(self, pid: int) -> Optional[ActionResult]:
+        """Blijft de bot draaien, of slaat hij meteen weer af?
+
+        Geeft ``None`` terug als hij de hele bevestigingsperiode overeind
+        bleef; anders een ActionResult dat vertelt wat er misging. De periode
+        is kort: langer wachten maakt elke start traag, en een bot die na een
+        minuut alsnog omvalt wordt door de bewaker afgehandeld.
+        """
+        deadline = self._clock() + self.settle_seconds
+        while self._clock() < deadline:
+            self._sleep(_POLL_INTERVAL)
+            published = supervisor_module.read_status(self.status_path)
+            state = published.get("state")
+
+            if state == supervisor_module.STATUS_FAILED:
+                return ActionResult(
+                    ok=False,
+                    action="start",
+                    state=state,
+                    message=published.get("message") or "JARVIS stopte direct na het starten.",
+                    detail=published.get("advice", ""),
+                    http_status=409,
+                )
+            if not self._pid_alive(pid):
+                self._clear_pid()
+                return ActionResult(
+                    ok=False,
+                    action="start",
+                    state=supervisor_module.STATUS_FAILED,
+                    message="JARVIS stopte direct na het starten.",
+                    detail="Kijk in logs/supervisor.log wat daar staat, of draai diagnose.bat.",
+                    http_status=500,
+                )
+        return None
 
     def _clear_stop_flag(self) -> None:
         try:

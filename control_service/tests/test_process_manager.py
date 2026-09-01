@@ -87,7 +87,7 @@ def test_start_spawns_the_supervisor_not_the_bot_directly(tmp_path: Path) -> Non
     class _Immediate(_Clock):
         def __call__(self) -> float:
             _write_status(manager, supervisor_module.STATUS_RUNNING)
-            return self.now
+            return super().__call__()
 
     manager._clock = _Immediate()
     result = manager.start()
@@ -121,7 +121,7 @@ def test_start_reports_a_failed_supervisor_with_advice(tmp_path: Path) -> None:
                 message="De API-sleutels werden afgewezen.",
                 advice="Draai INSTALLEREN-WINDOWS.bat.",
             )
-            return self.now
+            return super().__call__()
 
     manager._clock = _FailingClock()
     result = manager.start()
@@ -433,3 +433,80 @@ def test_the_real_spawner_registers_the_child_so_it_can_be_reaped(tmp_path: Path
         if child is not None:
             child.kill()
             child.wait()
+
+
+# --------------------------------------------------------------------------
+# Blijft de bot ook echt draaien na "gestart"?
+# --------------------------------------------------------------------------
+
+
+def test_a_bot_that_dies_right_after_running_is_not_reported_as_started(tmp_path: Path) -> None:
+    """De bewaker meldt 'running' zodra hij de bot gestart heeft.
+
+    Een bot die meteen afslaat op een ontbrekende sleutel is er een seconde
+    later alweer niet. Zonder bevestiging meldde start() "JARVIS is gestart"
+    voor een bot die al gestopt was, en opende START-JARVIS.bat daarna de
+    browser alsof alles goed ging.
+    """
+    world = _World()
+    manager = _manager(tmp_path, world)
+    beurt = {"n": 0}
+
+    class _EersteRunningDanFailed(_Clock):
+        def __call__(self) -> float:
+            beurt["n"] += 1
+            if beurt["n"] <= 2:
+                _write_status(manager, supervisor_module.STATUS_RUNNING)
+            else:
+                _write_status(
+                    manager,
+                    supervisor_module.STATUS_FAILED,
+                    message="De API-sleutels ontbreken of werden afgewezen.",
+                    advice="Draai INSTALLEREN-WINDOWS.bat.",
+                )
+            return super().__call__()
+
+    manager._clock = _EersteRunningDanFailed()
+    result = manager.start()
+
+    assert result.ok is False, "een bot die meteen omvalt geldt niet als gestart"
+    assert "sleutels" in result.message
+    assert result.http_status == 409
+
+
+def test_a_bot_that_keeps_running_is_reported_as_started(tmp_path: Path) -> None:
+    """Tegenhanger: de bevestiging mag een geslaagde start niet afkeuren."""
+    world = _World()
+    manager = _manager(tmp_path, world)
+
+    class _BlijftDraaien(_Clock):
+        def __call__(self) -> float:
+            _write_status(manager, supervisor_module.STATUS_RUNNING)
+            return super().__call__()
+
+    manager._clock = _BlijftDraaien()
+    result = manager.start()
+
+    assert result.ok is True
+    assert result.state == supervisor_module.STATUS_RUNNING
+
+
+def test_a_supervisor_that_disappears_during_the_settle_window_is_caught(tmp_path: Path) -> None:
+    """Ook als er geen 'failed' geschreven wordt, telt het procesfeit."""
+    world = _World()
+    manager = _manager(tmp_path, world)
+
+    class _RunningMaarProcesWeg(_Clock):
+        def __call__(self) -> float:
+            _write_status(manager, supervisor_module.STATUS_RUNNING)
+            waarde = super().__call__()
+            if waarde >= 1:
+                world.alive.clear()
+            return waarde
+
+    manager._clock = _RunningMaarProcesWeg()
+    result = manager.start()
+
+    assert result.ok is False
+    assert "logs/supervisor.log" in result.detail.replace("\\", "/")
+    assert not manager.pid_path.exists()
