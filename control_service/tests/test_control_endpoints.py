@@ -427,3 +427,113 @@ def test_extract_token_handles_both_header_styles() -> None:
     assert auth.extract_token(None, "abc") == "abc"
     assert auth.extract_token("abc", None) == "abc"
     assert auth.extract_token(None, None) is None
+
+
+# --------------------------------------------------------------------------
+# Herstel bij een onbereikbare provider
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _reset_breaker():
+    """Elke test begint met een gesloten breaker."""
+    from control_service.app import _VALIDATION_BREAKER
+
+    _VALIDATION_BREAKER.reset()
+    yield
+    _VALIDATION_BREAKER.reset()
+
+
+def test_a_single_hiccup_is_retried_before_reporting_unreachable(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Eén hapering mag niet meteen 'niet bereikbaar' opleveren."""
+    import bot.credential_status as cs
+
+    pogingen = {"n": 0}
+
+    def wisselvallig(**kwargs):
+        if kwargs.get("online"):
+            pogingen["n"] += 1
+            if pogingen["n"] == 1:
+                return {"state": cs.VERIFICATION_UNAVAILABLE, "providers": {}}
+        return {"state": cs.READY, "providers": {}}
+
+    monkeypatch.setattr(cs, "status_report", wisselvallig)
+
+    response = client.post(f"{P}/validate-credentials", headers=AUTH)
+
+    assert response.status_code == 200
+    assert response.json()["state"] == cs.READY
+    assert pogingen["n"] == 2, "de tweede poging is niet gedaan"
+
+
+def test_a_rejected_key_is_never_retried(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Een ingetrokken sleutel opnieuw aanbieden helpt niemand."""
+    import bot.credential_status as cs
+
+    pogingen = {"n": 0}
+
+    def afgewezen(**_kwargs):
+        pogingen["n"] += 1
+        return {"state": cs.CONFIGURATION_ERROR, "providers": {}}
+
+    monkeypatch.setattr(cs, "status_report", afgewezen)
+
+    response = client.post(f"{P}/validate-credentials", headers=AUTH)
+
+    assert pogingen["n"] == 1
+    assert "afgewezen" in response.json()["message"]
+
+
+def test_a_persistently_unreachable_provider_reports_unreachable_not_rejected(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """De harde regel: onbereikbaar is nooit een verkeerde sleutel."""
+    import bot.credential_status as cs
+
+    monkeypatch.setattr(
+        cs, "status_report", lambda **_kw: {"state": cs.VERIFICATION_UNAVAILABLE, "providers": {}}
+    )
+
+    body = client.post(f"{P}/validate-credentials", headers=AUTH).json()
+
+    assert body["state"] == cs.VERIFICATION_UNAVAILABLE
+    assert "netwerkprobleem" in body["message"]
+    assert "afgewezen" not in body["message"]
+    assert body["trades_placed"] is False
+
+
+def test_repeated_clicking_while_offline_stops_calling_the_provider(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Drie keer klikken zonder internet moet niet zes keer naar buiten bellen."""
+    import bot.credential_status as cs
+
+    aanroepen = {"n": 0}
+
+    def onbereikbaar(**kwargs):
+        if kwargs.get("online"):
+            aanroepen["n"] += 1
+        return {"state": cs.VERIFICATION_UNAVAILABLE, "providers": {}}
+
+    monkeypatch.setattr(cs, "status_report", onbereikbaar)
+
+    for _ in range(5):
+        response = client.post(f"{P}/validate-credentials", headers=AUTH)
+        assert response.status_code == 200
+
+    assert aanroepen["n"] <= 4, f"de breaker greep niet in: {aanroepen['n']} uitgaande pogingen"
+    laatste = client.post(f"{P}/validate-credentials", headers=AUTH).json()
+    assert "overgeslagen" in laatste["message"] or "niet bereikbaar" in laatste["message"].lower()
+
+
+def test_the_breaker_never_hides_a_working_key(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Een geslaagde controle sluit de breaker weer."""
+    import bot.credential_status as cs
+    from control_service.app import _VALIDATION_BREAKER
+
+    monkeypatch.setattr(cs, "status_report", lambda **_kw: {"state": cs.READY, "providers": {}})
+
+    assert client.post(f"{P}/validate-credentials", headers=AUTH).json()["state"] == cs.READY
+    assert _VALIDATION_BREAKER.state == "closed"

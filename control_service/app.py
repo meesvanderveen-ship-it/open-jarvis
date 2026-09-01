@@ -23,6 +23,14 @@ from typing import Any, Optional
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 
+from bot.resilience import (
+    CircuitBreaker,
+    CircuitBreakerOpen,
+    RetryExhausted,
+    RetryPolicy,
+    describe_failure,
+    retry_call,
+)
 from control_service import auth, config
 from control_service.process_manager import ActionResult, ProcessManager
 from dashboard.backend.security.redact import redact
@@ -36,6 +44,28 @@ router = APIRouter(prefix=config.API_PREFIX)
 #: Eén manager voor het hele proces: twee tegelijk zouden elkaars pid-bestand
 #: kunnen overschrijven.
 _MANAGER = ProcessManager()
+
+#: De sleutelcontrole is het enige endpoint dat namens de gebruiker naar buiten
+#: belt, en het enige dat hij zelf herhaaldelijk kan aanroepen -- de knop
+#: "Controleer mijn API-sleutels" in de popup. Iemand die offline is en drie
+#: keer klikt, stuurt anders drie keer een verzoek naar OpenAI en Coinbase.
+#: Na drie mislukkingen houdt de breaker dat een minuut tegen en zegt dat ook.
+_VALIDATION_BREAKER = CircuitBreaker(
+    "de sleutelcontrole", failure_threshold=3, cooldown_seconds=60.0
+)
+
+#: Twee pogingen met een korte pauze. Bewust klein: dit endpoint hangt aan een
+#: knop in de browser, dus lang wachten is erger dan een eerlijk "onbekend".
+_VALIDATION_RETRY = RetryPolicy(max_attempts=2, base_delay=1.0, max_delay=2.0, jitter=0.2)
+
+
+class _ProviderUnreachable(RuntimeError):
+    """De provider antwoordde niet. Bestaat om retry_call te laten herhalen.
+
+    ``status_report`` vangt netwerkfouten zelf af en geeft de toestand
+    VERIFICATION_UNAVAILABLE terug in plaats van te falen. Zonder deze
+    vertaling naar een exceptie zou de retrylaag nooit iets te herhalen zien.
+    """
 
 
 def get_manager() -> ProcessManager:
@@ -217,8 +247,42 @@ def validate_credentials(online: bool = Query(default=True)) -> dict[str, Any]:
     """
     from bot import credential_status as cs
 
+    def _verify() -> dict[str, Any]:
+        uitkomst = cs.status_report(online=online, timeout=config.VALIDATION_TIMEOUT_SECONDS)
+        if online and uitkomst.get("state") == cs.VERIFICATION_UNAVAILABLE:
+            # Onbereikbaar is precies het geval dat een tweede poging kan
+            # oplossen. Afgewezen sleutels komen hier nooit terecht: die
+            # leveren CONFIGURATION_ERROR op en worden meteen teruggegeven.
+            raise _ProviderUnreachable("provider niet bereikbaar")
+        return uitkomst
+
     try:
-        report = cs.status_report(online=online, timeout=config.VALIDATION_TIMEOUT_SECONDS)
+        report = retry_call(
+            _verify,
+            description="API-sleutels controleren",
+            policy=_VALIDATION_RETRY,
+            breaker=_VALIDATION_BREAKER,
+            retry_on=lambda exc: isinstance(exc, _ProviderUnreachable),
+            logger=LOGGER,
+        )
+    except CircuitBreakerOpen as exc:
+        # Herhaald klikken terwijl er geen internet is, moet niet elke keer
+        # opnieuw naar OpenAI en Coinbase bellen.
+        return redact(
+            {
+                "state": cs.VERIFICATION_UNAVAILABLE,
+                "verified_online": online,
+                "providers": {},
+                "message": describe_failure(exc),
+                "trades_placed": False,
+            }
+        )
+    except RetryExhausted:
+        # Alle pogingen op: dit is een netwerkprobleem, geen sleutelprobleem.
+        # De offline vormcontrole levert nog wel bruikbare informatie.
+        report = cs.status_report(online=False)
+        report["verified_online"] = False
+        report["state"] = cs.VERIFICATION_UNAVAILABLE
     except Exception as exc:  # noqa: BLE001 -- ook hier nooit een kale traceback
         LOGGER.exception("Credential-validatie is mislukt.")
         raise HTTPException(
