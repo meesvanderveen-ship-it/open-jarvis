@@ -267,6 +267,10 @@ Snel de laatste regels bekijken kan ook via de Chrome-extensie, kopje
 
 ## 8. Er gaat iets mis
 
+> **Staat jouw foutmelding hieronder niet bij?** In
+> [`PROBLEMEN-OPLOSSEN.md`](PROBLEMEN-OPLOSSEN.md) staat een volledige tabel
+> met alle bekende problemen, de oorzaak en de oplossing.
+
 Draai eerst **`diagnose.bat`**. Die controleert alles en zegt per onderdeel wat
 er aan de hand is:
 
@@ -400,10 +404,19 @@ nooit zonder dat je hebt kunnen lezen wat er aan de hand is.
 
 ## Voor wie verder wil lezen
 
+- [`HANDLEIDING-WINDOWS.md`](HANDLEIDING-WINDOWS.md) — de uitgebreide
+  handleiding: elke stap met uitleg, geschreven voor wie nog nooit met code
+  heeft gewerkt.
+- [`PROBLEMEN-OPLOSSEN.md`](PROBLEMEN-OPLOSSEN.md) — alle bekende problemen in
+  één tabel: wat je ziet, waar het door komt, wat je eraan doet.
 - [`docs/TECHNISCHE-README.md`](docs/TECHNISCHE-README.md) — volledige
   technische documentatie: architectuur, alle instellingen, veiligheidslagen.
 - [`docs/FAILURES.md`](docs/FAILURES.md) — welke tests bekend rood staan en
   waarom. Bijna allemaal veiligheidspoorten die dicht horen te staan.
+- [`RELEASE-CANDIDATE.md`](RELEASE-CANDIDATE.md) — wat er in deze versie is
+  getest, en wat eerlijk gezegd niet getest kón worden.
+- [`RELEASE-CHECKLIST.md`](RELEASE-CHECKLIST.md) — de controlelijst die vóór
+  het uitgeven van een versie wordt afgelopen.
 - [`INSTALLATIE-WINDOWS.md`](INSTALLATIE-WINDOWS.md) — extra detail over de
   Windows-installatie.
 - [`.env.example`](.env.example) — elke instelling met uitleg.
