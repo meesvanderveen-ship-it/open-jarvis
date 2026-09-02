@@ -110,7 +110,7 @@ def detect_service_status(service_name: str = "coinbase-bot.service") -> Dict[st
                 "systemctl",
                 "show",
                 service_name,
-                "--property=ActiveState,SubState,MainPID,ActiveEnterTimestamp",
+                "--property=LoadState,ActiveState,SubState,MainPID,ActiveEnterTimestamp",
                 "--no-page",
             ],
             check=False,
@@ -130,6 +130,17 @@ def detect_service_status(service_name: str = "coinbase-bot.service") -> Dict[st
         if "=" in line:
             k, v = line.split("=", 1)
             props[k] = v
+    # Een unit die systemd niet kent geeft geen foutcode terug: `systemctl show`
+    # antwoordt met rc 0 en ActiveState=inactive, precies alsof de dienst wel
+    # bestaat maar stilstaat. Zonder LoadState was dat niet uit elkaar te
+    # houden, en werd op iedere machine mét systemd maar zonder deze unit
+    # gemeld dat de bot "niet draait" -- terwijl er in werkelijkheid niets te
+    # melden viel. Niet kunnen kijken is iets anders dan gekeken hebben.
+    load_state = props.get("LoadState", "")
+    if load_state in {"not-found", "bad", "masked"}:
+        out["error"] = f"systemd kent {service_name} niet (LoadState={load_state})"
+        out["load_state"] = load_state
+        return out
     uptime_seconds = None
     active_enter = props.get("ActiveEnterTimestamp", "")
     try:
@@ -140,6 +151,7 @@ def detect_service_status(service_name: str = "coinbase-bot.service") -> Dict[st
         uptime_seconds = None
     out.update({
         "detectable": True,
+        "load_state": load_state or "unknown",
         "active_state": props.get("ActiveState", "unknown"),
         "sub_state": props.get("SubState", "unknown"),
         "status": f"{props.get('ActiveState', 'unknown')}/{props.get('SubState', 'unknown')}",

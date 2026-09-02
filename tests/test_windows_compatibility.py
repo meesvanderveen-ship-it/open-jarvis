@@ -496,6 +496,42 @@ def test_missing_replica_directories_are_not_an_error():
         assert isinstance(path, str) and path
 
 
+def test_an_unreadable_search_path_is_skipped_not_fatal(tmp_path, monkeypatch):
+    """Geen leesrechten op een zoekpad betekent 'daar staat niets', niet 'stop'.
+
+    Een van de standaard zoeklocaties ligt onder /root. Wie niet als beheerder
+    draait -- dus iedere gewone gebruiker, en de bouwmachine -- krijgt daar geen
+    False maar een PermissionError: Path.exists() slikt alleen 'bestaat
+    niet'-fouten, niet 'geen toegang'. De audit viel daardoor om op precies de
+    machines waarvoor hij bedoeld is.
+
+    De map hieronder wordt echt op 000 gezet, zodat de fout ook echt optreedt
+    en dit geen test op een nagebootste situatie is.
+    """
+    from bot import phase_follower_receiver_api_audit as module
+
+    verboden = tmp_path / "verboden"
+    verboden.mkdir()
+    doel = verboden / "replica"
+    doel.mkdir()
+    verboden.chmod(0o000)
+    try:
+        if os.access(doel, os.F_OK):  # root mag alles; dan bewijst dit niets
+            pytest.skip("deze gebruiker mag overal bij, de fout treedt niet op")
+
+        with pytest.raises(PermissionError):
+            doel.exists()
+
+        assert module._bestaat(doel) is False
+
+        monkeypatch.setenv("FOLLOWER_RECEIVER_PATHS", str(doel))
+        gevonden = module._candidate_paths(tmp_path / "project", None)
+
+        assert doel in gevonden, "het pad hoort gewoon in de lijst te staan"
+    finally:
+        verboden.chmod(0o755)
+
+
 # --------------------------------------------------------------------------
 # cmd.exe-valkuilen in de batchbestanden
 # --------------------------------------------------------------------------
@@ -650,3 +686,62 @@ def test_a_broad_except_always_reports_something(relative: str):
             stil.append(node.lineno)
 
     assert stil == [], f"{relative}: brede except zonder melding op regel(s) {stil}"
+
+
+# --------------------------------------------------------------------------
+# systemd: een onbekende unit is niet hetzelfde als een gestopte bot
+# --------------------------------------------------------------------------
+
+
+def _neppe_systemctl(map_: Path, uitvoer: str, returncode: int = 0) -> None:
+    """Zet een systemctl op het pad die vaste uitvoer geeft.
+
+    Een echte systemd draaien kan hier niet, maar het gaat om wat de code met
+    de *uitvoer* doet. Door een echt uitvoerbaar bestand neer te zetten loopt
+    subprocess.run wel gewoon zijn normale weg -- dit test de code, niet een
+    vervangen functie.
+    """
+    script = map_ / "systemctl"
+    script.write_text(f"#!/bin/sh\ncat <<'EOF'\n{uitvoer}\nEOF\nexit {returncode}\n", encoding="utf-8")
+    script.chmod(0o755)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="deze truc met een shell-script werkt alleen op POSIX")
+def test_a_unit_systemd_does_not_know_is_not_reported_as_a_stopped_bot(tmp_path, monkeypatch):
+    """`systemctl show` op een onbekende unit geeft geen foutcode.
+
+    Het antwoordt met rc 0 en ActiveState=inactive, precies alsof de dienst
+    bestaat maar stilstaat. Zonder LoadState erbij meldde de statusrapportage
+    daardoor op iedere machine mét systemd maar zónder deze unit dat de bot
+    "niet draait", terwijl er in werkelijkheid niets te melden viel.
+    """
+    from tools.autonomous_live_run_common import detect_service_status
+
+    _neppe_systemctl(
+        tmp_path,
+        "LoadState=not-found\nActiveState=inactive\nSubState=dead\nMainPID=0\nActiveEnterTimestamp=",
+    )
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+
+    uitkomst = detect_service_status()
+
+    assert uitkomst["detectable"] is False, "een onbekende unit mag niet als meting tellen"
+    assert uitkomst["load_state"] == "not-found"
+    assert not uitkomst["status"].startswith("inactive")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="deze truc met een shell-script werkt alleen op POSIX")
+def test_a_unit_that_really_is_stopped_is_still_reported_as_stopped(tmp_path, monkeypatch):
+    """De keerzijde: een bestaande, gestopte unit moet wél gemeten worden."""
+    from tools.autonomous_live_run_common import detect_service_status
+
+    _neppe_systemctl(
+        tmp_path,
+        "LoadState=loaded\nActiveState=inactive\nSubState=dead\nMainPID=0\nActiveEnterTimestamp=",
+    )
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+
+    uitkomst = detect_service_status()
+
+    assert uitkomst["detectable"] is True
+    assert uitkomst["status"] == "inactive/dead"
