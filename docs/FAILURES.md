@@ -5,10 +5,10 @@ Niet met de hand bijgehouden, dus niet stiekem verouderd.
 
 | | |
 |---|---|
-| Gemeten op | 2026-09-01 |
+| Gemeten op | 2026-09-02 |
 | Python | 3.11.15 (Linux) |
 | Commando | `python -m pytest -q` |
-| Resultaat | **2891 geslaagd, 103 gefaald, 2 overgeslagen** |
+| Resultaat | **2895 geslaagd, 103 gefaald, 2 overgeslagen** |
 
 **Alle 103 failures hieronder bestonden al in de aangeleverde ZIP.**
 Er zijn geen nieuwe failures geintroduceerd. Twee failures uit de ZIP zijn

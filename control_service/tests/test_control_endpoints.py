@@ -537,3 +537,76 @@ def test_the_breaker_never_hides_a_working_key(client: TestClient, monkeypatch: 
 
     assert client.post(f"{P}/validate-credentials", headers=AUTH).json()["state"] == cs.READY
     assert _VALIDATION_BREAKER.state == "closed"
+
+
+# --------------------------------------------------------------------------
+# Poortfouten
+# --------------------------------------------------------------------------
+
+
+def test_a_busy_port_is_detected_before_uvicorn_starts() -> None:
+    """uvicorn vangt een bindfout zelf af, dus achteraf opvangen werkt niet.
+
+    Het `except OSError` om uvicorn.run() heen werd nooit bereikt: uvicorn
+    logt 'ERROR: [Errno 98] address already in use' en sluit netjes af. De
+    gebruiker hield een Engelse regel over waar hij niets mee kan, terwijl een
+    bezette poort juist de meest voorkomende startfout is.
+    """
+    import socket
+
+    from control_service.run import _port_in_use
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as bezet:
+        bezet.bind(("127.0.0.1", 0))
+        bezet.listen(1)
+        poort = bezet.getsockname()[1]
+
+        assert _port_in_use("127.0.0.1", poort) is True
+
+
+def test_a_free_port_is_not_reported_as_busy() -> None:
+    import socket
+
+    from control_service.run import _port_in_use
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as vrij:
+        vrij.bind(("127.0.0.1", 0))
+        poort = vrij.getsockname()[1]
+    # De socket is nu dicht, dus de poort is weer vrij.
+
+    assert _port_in_use("127.0.0.1", poort) is False
+
+
+def test_the_busy_port_message_names_the_port_and_a_way_out(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from control_service import run as run_module
+
+    monkeypatch.setattr(run_module, "_port_in_use", lambda host, port: True)
+    monkeypatch.setattr(run_module.config, "PORT", 8770)
+
+    code = run_module.main()
+
+    uitvoer = capsys.readouterr().err
+    assert code == 1
+    assert "8770" in uitvoer
+    assert "STOP-JARVIS.bat" in uitvoer
+    assert "JARVIS_CONTROL_PORT" in uitvoer
+    assert "Traceback" not in uitvoer
+
+
+def test_the_service_refuses_a_non_loopback_address(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Deze dienst kan de bot starten en stoppen; van buiten bereikbaar is fout."""
+    from control_service import run as run_module
+
+    monkeypatch.setattr(run_module.config, "HOST", "0.0.0.0")
+    monkeypatch.setattr(run_module.config, "ALLOW_NON_LOOPBACK", False)
+
+    code = run_module.main()
+
+    uitvoer = capsys.readouterr().err
+    assert code == 2
+    assert "weigert te starten" in uitvoer
+    assert "127.0.0.1" in uitvoer
