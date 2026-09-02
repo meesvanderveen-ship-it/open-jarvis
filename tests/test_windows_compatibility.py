@@ -576,3 +576,77 @@ def test_delayed_expansion_is_enabled_where_it_is_used():
             assert "enabledelayedexpansion" in text.lower(), (
                 f"{path.name} gebruikt !VAR! zonder delayed expansion aan te zetten"
             )
+
+
+# --------------------------------------------------------------------------
+# Foutafhandeling in de nieuw toegevoegde modules
+# --------------------------------------------------------------------------
+
+NIEUWE_MODULES = [
+    "bot/health_check.py",
+    "bot/resilience.py",
+    "bot/supervisor.py",
+    "control_service/app.py",
+    "control_service/auth.py",
+    "control_service/process_manager.py",
+    "control_service/run.py",
+    "tools/build_failure_register.py",
+    "tools/check_python.py",
+    "tools/jarvis_control.py",
+]
+
+
+@pytest.mark.parametrize("relative", NIEUWE_MODULES, ids=lambda r: Path(r).name)
+def test_no_broad_exception_is_silently_swallowed(relative: str):
+    """`except Exception: pass` verbergt fouten in plaats van ze af te handelen.
+
+    Een smalle except die precies één fouttype opvangt is iets anders: daar
+    betekent de fout meestal dat het doel al bereikt is -- een proces dat al
+    gestopt is, een bestand dat al weg is. Die mogen wel stil zijn.
+    """
+    tree = ast.parse((PROJECT_ROOT / relative).read_text(encoding="utf-8"))
+
+    fout = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ExceptHandler):
+            continue
+        alleen_pass = len(node.body) == 1 and isinstance(node.body[0], ast.Pass)
+        if not alleen_pass:
+            continue
+        breed = node.type is None or (
+            isinstance(node.type, ast.Name) and node.type.id in {"Exception", "BaseException"}
+        )
+        if breed:
+            fout.append(node.lineno)
+
+    assert fout == [], f"{relative}: brede except met alleen 'pass' op regel(s) {fout}"
+
+
+@pytest.mark.parametrize("relative", NIEUWE_MODULES, ids=lambda r: Path(r).name)
+def test_a_broad_except_always_reports_something(relative: str):
+    """Een brede except mag, maar dan moet de fout wel ergens terechtkomen.
+
+    Ofwel doorgegooid, ofwel gelogd, ofwel omgezet in een leesbare melding.
+    Stilzwijgend doorgaan met een onbekende fout is wat deze regel verbiedt.
+    """
+    bron = (PROJECT_ROOT / relative).read_text(encoding="utf-8")
+    tree = ast.parse(bron)
+
+    stil = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ExceptHandler):
+            continue
+        breed = node.type is None or (
+            isinstance(node.type, ast.Name) and node.type.id in {"Exception", "BaseException"}
+        )
+        if not breed:
+            continue
+        lichaam = "\n".join(ast.unparse(stmt) for stmt in node.body)
+        meldt = any(
+            teken in lichaam
+            for teken in ("raise", "LOGGER", "logging", "log.", "print", "return", "HealthResult", "ActionResult")
+        )
+        if not meldt:
+            stil.append(node.lineno)
+
+    assert stil == [], f"{relative}: brede except zonder melding op regel(s) {stil}"
