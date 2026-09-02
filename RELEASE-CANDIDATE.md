@@ -135,7 +135,12 @@ doet: geen nieuwe failures. Dat draait op elke push via
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml), op Python 3.11 en 3.12.
 
 Geen enkele bestaande test is aangepast om hem groen te maken, en geen enkele
-test is overgeslagen of uitgezet.
+test is overgeslagen of uitgezet. Vier bestaande testbestanden zijn wél
+gewijzigd, elk omdat de test zelf aantoonbaar fout was en met de reden erbij in
+het bestand: drie legden een vast serverpad (`/root/apps/Crypto/coinbase_bot`)
+vast dat op geen andere machine bestaat, en één testdubbel miste een methode
+die de echte klasse wel heeft. In alle vier gevallen bleef de bewering die de
+test doet ongemoeid.
 
 ---
 
@@ -186,7 +191,7 @@ Dit is de eerlijke lijst. Niets hiervan is met een statische controle
 
 - **Windows.** Alle ontwikkeling en alle tests draaiden op Linux. De
   `.bat`-bestanden zijn geanalyseerd, hun logica is nagebouwd in
-  `tests/test_windows_compatibility.py` (157 tests over quoting, CRLF,
+  `tests/test_windows_compatibility.py` (160 tests over quoting, CRLF,
   `chcp 65001`, vertraagde variabele-expansie en foutpaden), maar **er heeft
   nooit een echte `install.bat` op een echte Windows-pc gedraaid.** Dat is de
   belangrijkste openstaande controle.
@@ -223,7 +228,7 @@ Dit is de eerlijke lijst. Niets hiervan is met een statische controle
 
 | Onderdeel | Status | Toelichting |
 |---|---|---|
-| **Windows-installatie** | Klaar, niet op Windows bevestigd | Negen stappen, herhaalbaar, leesbare fouten. Logica gedekt door 157 tests; een echte Windows-run ontbreekt. |
+| **Windows-installatie** | Klaar, niet op Windows bevestigd | Negen stappen, herhaalbaar, leesbare fouten. Logica gedekt door 160 tests; een echte Windows-run ontbreekt. |
 | **Chrome-extensie** | Werkend in Chromium, niet in Chrome | Volledige rondgang zonder fouten; Manifest V3; alleen `storage` en `alarms`. |
 | **API-sleutels** | Werkend met nepsleutels | Drie uitkomsten correct onderscheiden; uitsluitend lezende controle; nooit tegen de echte dienst getest. |
 | **Security** | Gecontroleerd | Loopback-only bevestigd op kernelniveau; tokenauth; geen secrets in logs, documentatie of repository; geen stacktraces naar de browser. |
