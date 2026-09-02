@@ -67,6 +67,61 @@ def _samenvatting(uitvoer: str) -> str:
     return "(geen samenvatting gevonden)"
 
 
+#: De kopregel waarmee pytest elk faalverslag begint: ``___ test_naam ___``.
+_KOP = re.compile(r"^_{3,} (.+?) _{3,}$")
+
+
+def detailsecties(uitvoer: str) -> dict[str, str]:
+    """Knip de faalverslagen uit de pytest-uitvoer, op testnaam.
+
+    De sleutel is wat pytest in zijn kopregel zet. Dat is niet het volledige
+    node-id maar alleen de testnaam (bij een klasse: ``Klasse.naam``), dus er
+    wordt hieronder op het staartstuk van het node-id gezocht.
+    """
+    secties: dict[str, str] = {}
+    naam: Optional[str] = None
+    regels: list[str] = []
+
+    for regel in uitvoer.splitlines():
+        kop = _KOP.match(regel)
+        if kop:
+            if naam is not None:
+                secties[naam] = "\n".join(regels).rstrip()
+            naam, regels = kop.group(1).strip(), []
+            continue
+        if naam is None:
+            continue
+        # Een nieuwe blokkop (=== ... ===) sluit het laatste verslag af.
+        if regel.startswith("=") and regel.endswith("="):
+            secties[naam] = "\n".join(regels).rstrip()
+            naam, regels = None, []
+            continue
+        regels.append(regel)
+
+    if naam is not None:
+        secties[naam] = "\n".join(regels).rstrip()
+    return secties
+
+
+def _detail_voor(nodeid: str, secties: dict[str, str], maxregels: int = 40) -> str:
+    """Het faalverslag bij een node-id, ingekort tot de laatste regels.
+
+    Ingekort en niet volledig: bij een lange assertie is het slot -- de
+    assertie zelf en de waarden -- wat je nodig hebt, en een CI-log dat
+    dichtslibt leest niemand meer.
+    """
+    staart = nodeid.split("::", 1)[1].replace("::", ".")
+    tekst = secties.get(staart)
+    if tekst is None:
+        return "    (geen faalverslag in deze uitvoer gevonden)"
+
+    regels = tekst.splitlines()
+    weggelaten = len(regels) - maxregels
+    if weggelaten > 0:
+        regels = [f"    [{weggelaten} regels hierboven weggelaten]", *regels[-maxregels:]]
+    return "\n".join(f"    {regel}" for regel in regels)
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("uitvoer_bestand", nargs="?", help="bestand met pytest-uitvoer")
@@ -97,10 +152,19 @@ def main(argv: Optional[list[str]] = None) -> int:
     print(f"  gemeten failures in deze run     : {len(gemeten)}")
 
     if nieuw:
+        secties = detailsecties(uitvoer)
         print("")
         print(f"NIEUWE FAILURES ({len(nieuw)}) -- deze stonden niet in het register:")
         for naam in nieuw:
             print(f"  {naam}")
+        # Ook het faalverslag erbij: een CI-run die alleen de namen noemt
+        # dwingt je het artefact te downloaden voordat je iets kunt zoeken, en
+        # juist een failure die alleen op de bouwmachine optreedt is lokaal
+        # niet na te spelen.
+        for naam in nieuw:
+            print("")
+            print(f"--- {naam}")
+            print(_detail_voor(naam, secties))
         print("")
         print("Dit is een regressie. Zoek de oorzaak op; werk niet eerst het register bij.")
         return EXIT_NIEUWE_FAILURES
