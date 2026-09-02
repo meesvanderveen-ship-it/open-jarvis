@@ -67,7 +67,12 @@ def test_stale_lock_plan_is_preview_only_and_removes_nothing(tmp_path: Path) -> 
     assert plan["service_active"] is False
     assert plan["process_exists"] is False
     assert plan["safe_to_remove_after_operator_ack"] is True
-    assert plan["command_preview"] == "rm -f /root/apps/Crypto/coinbase_bot/state/run_trader_loop.lock"
+    # Was: een vast serverpad (/root/apps/Crypto/coinbase_bot). Dat maakte het
+    # voorbeeldcommando onbruikbaar op elke andere machine, Windows incluis --
+    # het wees naar een lockbestand dat daar niet bestaat. Het pad hoort mee te
+    # bewegen met de map waarvoor de status opgebouwd wordt.
+    assert plan["command_preview"] == f"rm -f {tmp_path / 'state' / 'run_trader_loop.lock'}"
+    assert "/root/apps" not in plan["command_preview"]
     assert plan["do_not_execute_now"] is True
     assert plan["lock_removed"] is False
 

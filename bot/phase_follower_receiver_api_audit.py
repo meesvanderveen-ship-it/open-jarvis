@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -7,10 +8,32 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 
 PHASE_FOLLOWER_RECEIVER_API_AUDIT = "follower_receiver_api_audit_v1"
-DEFAULT_FOLLOWER_PATHS = (
-    "/opt/coinbase-replica",
-    "/root/apps/Crypto/coinbase-replica",
-)
+
+
+def _default_follower_paths() -> tuple[str, ...]:
+    """Waar de replica-installatie gezocht wordt.
+
+    De twee paden hieronder zijn de bekende Linux-serverlocaties en blijven de
+    standaard, zodat bestaande deployments niets merken. Ze staan alleen niet
+    langer vast: op een Windows-pc bestaan ze niet, en dan moet iemand kunnen
+    aanwijzen waar de replica wel staat. Meerdere paden scheiden met os.pathsep
+    (';' op Windows, ':' op Linux).
+    """
+    override = (os.environ.get("FOLLOWER_RECEIVER_PATHS") or "").strip()
+    if override:
+        return tuple(part for part in override.split(os.pathsep) if part.strip())
+    return FALLBACK_FOLLOWER_PATHS
+
+
+#: De bekende Linux-serverlocaties. Blijven de standaard, zodat bestaande
+#: deployments niets merken van de instelbaarheid hierboven.
+FALLBACK_FOLLOWER_PATHS = ("/opt/coinbase-replica", "/root/apps/Crypto/coinbase-replica")
+
+#: Bewaard omdat de naam elders bekend kan zijn. Let op: dit is een momentopname
+#: van het importmoment. Code die de instelling uit .env moet respecteren roept
+#: _default_follower_paths() aan, want .env wordt door bot.config pas bij import
+#: geladen en die volgorde is niet gegarandeerd.
+DEFAULT_FOLLOWER_PATHS = _default_follower_paths()
 TEXT_SUFFIXES = {".py", ".md", ".txt", ".toml", ".yaml", ".yml", ".json", ".ini", ".cfg"}
 ROUTE_RE = re.compile(
     r"@(?:app|router|api|bp)\.(?:get|post|put|delete|patch)\(\s*[\"']([^\"']+)[\"']",
@@ -47,9 +70,32 @@ def _read_text(path: Path) -> str:
         return ""
 
 
+def _bestaat(path: Path) -> bool:
+    """Bestaat dit pad, en zo niet: waarom niet -- dat maakt hier niet uit.
+
+    ``Path.exists()`` geeft niet altijd netjes False terug. Het slikt alleen
+    'bestaat niet'-fouten (ENOENT, ENOTDIR, EBADF, ELOOP); bij 'geen toegang'
+    (EACCES) laat het de PermissionError gewoon door naar de aanroeper. Een van
+    de standaard zoekpaden hierboven ligt onder /root, en dat is voor iedereen
+    behalve de beheerder niet leesbaar -- dus wie deze audit als gewone
+    gebruiker draait kreeg geen uitkomst maar een crash. Voor deze functie is
+    dat onderscheid zinloos: een map waar we niet in mogen kijken betekent
+    'daar staat voor ons geen replica', niet 'stoppen'.
+    """
+    try:
+        return path.exists()
+    except OSError:
+        return False
+
+
 def _candidate_paths(root: Path, follower_paths: Optional[Sequence[str | Path]]) -> List[Path]:
     paths = [root / "replication"]
-    explicit = list(follower_paths) if follower_paths is not None else list(DEFAULT_FOLLOWER_PATHS)
+    # _default_follower_paths() en niet DEFAULT_FOLLOWER_PATHS: die constante is
+    # op het importmoment vastgezet, dus een FOLLOWER_RECEIVER_PATHS uit .env
+    # werkte alleen als die toevallig al in de omgeving stond voordat deze
+    # module geimporteerd werd. De instelling stond wel gedocumenteerd maar deed
+    # dan niets.
+    explicit = list(follower_paths) if follower_paths is not None else list(_default_follower_paths())
     paths.extend(Path(path) for path in explicit)
     sibling_root = root.parent
     try:
@@ -64,7 +110,7 @@ def _candidate_paths(root: Path, follower_paths: Optional[Sequence[str | Path]])
     out: List[Path] = []
     seen: set[str] = set()
     for path in paths:
-        key = str(path.resolve()) if path.exists() else str(path)
+        key = str(path.resolve()) if _bestaat(path) else str(path)
         if key not in seen:
             seen.add(key)
             out.append(path)
@@ -72,7 +118,7 @@ def _candidate_paths(root: Path, follower_paths: Optional[Sequence[str | Path]])
 
 
 def _iter_text_files(path: Path, *, max_files: int = 120) -> Iterable[Path]:
-    if not path.exists() or not path.is_dir():
+    if not _bestaat(path) or not path.is_dir():
         return []
     files: List[Path] = []
     for child in path.rglob("*"):
@@ -138,7 +184,9 @@ def build_follower_receiver_api_audit_report(
     live_default_enabled = False
 
     for candidate in checked_paths:
-        exists = candidate.exists()
+        # _bestaat en niet .exists(): dit is het pad dat de audit echt afloopt,
+        # en een van de standaard zoeklocaties ligt onder /root.
+        exists = _bestaat(candidate)
         is_current_master_replication = candidate.resolve() == (project_root / "replication").resolve() if exists else False
         paths_checked.append(
             {

@@ -92,7 +92,11 @@ def build_stale_lock_plan(root: Path = PROJECT_ROOT) -> Dict[str, Any]:
             and runtime.get("run_trader_loop_process_found") is False
             and bool(lock_pid)
         ),
-        "command_preview": "rm -f /root/apps/Crypto/coinbase_bot/state/run_trader_loop.lock",
+        # Het commando noemde hier een vast serverpad. Op elke andere machine
+        # -- en dus op elke Windows-pc -- verwees dat naar een lockbestand dat
+        # niet bestaat, waardoor het "voorbeeldcommando" niets zou opruimen.
+        # De map waar de status voor opgebouwd wordt is de juiste.
+        "command_preview": f"rm -f {Path(root) / 'state' / 'run_trader_loop.lock'}",
         "do_not_execute_now": True,
         "read_only": True,
         "state_write_performed": False,

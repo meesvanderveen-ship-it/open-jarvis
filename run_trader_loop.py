@@ -16,6 +16,7 @@ from bot.atomic_io import atomic_write_json, process_lock
 from bot.credential_status import READY, collect_checks, overall_state
 from bot.phase_c_live_guard import LIVE_ENTRY_GUARD_VERSION, LIVE_ENTRY_REQUIRED_GATES
 from bot.pre_live_startup_gate import assess_pre_live_startup_gate, enforce_pre_live_startup_gate
+from bot.resilience import RetryPolicy, describe_failure, is_transient, policies_snapshot
 from bot.product_rules import PRODUCT_RULE_NORMALIZER_VERSION
 from bot.run_cycle_guard import CycleBoundaryGuard
 from bot.phase_live_tiny_btc_preflight import ACTUAL_SUBMIT_ACK, PROVEN_PRODUCT
@@ -1334,6 +1335,19 @@ def main() -> None:
     cycle_guard = CycleBoundaryGuard()
     first_run = True
 
+    # Herstelbeleid voor de hoofdlus. Instelbaar via JARVIS_RECOVERY_* in .env;
+    # de standaard is 5 pogingen met 30s, 60s, 120s, 240s ertussen en daarna
+    # een afkoelperiode van 5 minuten.
+    recovery_policy = RetryPolicy.from_env(
+        "JARVIS_RECOVERY",
+        max_attempts=5,
+        base_delay=30.0,
+        max_delay=300.0,
+        cooldown_seconds=300.0,
+    )
+    consecutive_errors = 0
+    logging.info("Herstelbeleid | %s", json.dumps(policies_snapshot(recovery_policy), sort_keys=True))
+
     try:
         lock_path = os.getenv("RUN_TRADER_LOOP_LOCK_PATH", "state/runtime_mutation.lock")
         with process_lock(lock_path) as lock_info:
@@ -1359,6 +1373,15 @@ def main() -> None:
                             )
                             _run_guarded_cycle(guard=cycle_guard, cycle_type="heartbeat", engine=engine, publisher=publisher, cfg=cfg, now_utc=now)
 
+                    # De cyclus is helemaal doorgelopen: eerdere storingen
+                    # tellen niet meer mee voor de wachttijd.
+                    if consecutive_errors:
+                        logging.info(
+                            "Cyclus weer normaal doorlopen na %s storing(en); herstelteller op nul.",
+                            consecutive_errors,
+                        )
+                        consecutive_errors = 0
+
                     logging.info("Waiting for next hour boundary...")
                     _sleep_until_next_hour_boundary()
 
@@ -1367,22 +1390,50 @@ def main() -> None:
                     break
 
                 except Exception as e:
+                    # Herstel met oplopende wachttijd in plaats van een vaste
+                    # minuut. Een korte netwerkhapering hoefde nooit 60 seconden
+                    # te kosten, en een provider die plat ligt werd elke minuut
+                    # opnieuw bestookt -- precies het gedrag dat een rate limit
+                    # uitlokt. De teller gaat terug op nul zodra er weer een
+                    # cyclus goed gaat, zodat losse storingen niet opstapelen.
+                    consecutive_errors += 1
                     logging.error("Error in loop: %s", e, exc_info=True)
+                    logging.error("Uitleg: %s", describe_failure(e))
                     _write_jsonl(
                         "loop_errors.jsonl",
                         {
                             "generated_at": _utc_now().isoformat(),
                             "error": str(e),
+                            "error_type": type(e).__name__,
+                            "consecutive_errors": consecutive_errors,
+                            "transient": is_transient(e),
                         },
                     )
-                    logging.info("Recovery pause of 60 seconds started; rebuilding engine...")
-                    time.sleep(60)
+
+                    pause = recovery_policy.delay_for(min(consecutive_errors + 1, recovery_policy.max_attempts))
+                    if consecutive_errors >= recovery_policy.max_attempts:
+                        # Blijven falen is geen tijdelijke storing meer. Langer
+                        # rusten en dat ook zo benoemen, in plaats van in
+                        # hetzelfde tempo doorgaan.
+                        pause = max(pause, recovery_policy.cooldown_seconds)
+                        logging.error(
+                            "%s cycli achter elkaar mislukt. Langere afkoelperiode van %.0f seconden.",
+                            consecutive_errors,
+                            pause,
+                        )
+                    logging.info(
+                        "Herstelpauze van %.0f seconden (storing %s); daarna wordt de engine opnieuw opgebouwd.",
+                        pause,
+                        consecutive_errors,
+                    )
+                    time.sleep(pause)
                     try:
                         publisher = _init_replica_publisher()
                         engine = StrategyEngine()
                     except Exception as rebuild_error:
                         logging.error("StrategyEngine rebuild failed: %s", rebuild_error, exc_info=True)
-                        time.sleep(30)
+                        logging.error("Uitleg: %s", describe_failure(rebuild_error))
+                        time.sleep(recovery_policy.base_delay)
     except RuntimeError as exc:
         logging.error("Runner process lock blocked startup: %s", exc)
         raise SystemExit(3) from exc

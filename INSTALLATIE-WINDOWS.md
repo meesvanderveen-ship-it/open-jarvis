@@ -20,10 +20,12 @@ Drie dingen. Regel ze eerst, dan gaat de rest vanzelf.
 
 Ga naar **https://www.python.org/downloads/** en klik op de grote gele knop.
 
-> **Je hebt Python 3.12 of nieuwer nodig.** De pakketten die de bot gebruikt
-> (numpy, pandas) worden niet meer voor oudere versies uitgebracht. De
-> installatie controleert dit en stopt met een duidelijke melding als je
-> versie te oud is.
+> **Je hebt Python 3.11 tot en met 3.14 nodig; 3.12 is de aanbevolen versie.**
+> De pakketten die de bot gebruikt (numpy, pandas) worden niet voor oudere
+> versies uitgebracht. De installatie controleert dit twee keer — één keer
+> voordat er iets gebeurt, en één keer met de Python die de pakketten
+> daadwerkelijk krijgt — en stopt met een duidelijke melding als je versie
+> niet geschikt is.
 
 > **Belangrijk:** zet tijdens het installeren onderin een vinkje bij
 > **"Add python.exe to PATH"**. Zonder dat vinkje werkt de installatie niet.
@@ -68,11 +70,14 @@ niet.
 
 1. Pak het projectmapje uit op een plek die je terugvindt, bijvoorbeeld je
    Documenten-map.
-2. Open die map en zoek het bestand **`INSTALLEREN-WINDOWS.bat`**.
+2. Open die map en zoek het bestand **`install.bat`** (of het gelijkwaardige
+   **`INSTALLEREN-WINDOWS.bat`** — die doen precies hetzelfde).
 3. **Dubbelklik erop.**
 
 Er opent een zwart venster met witte tekst. Dat hoort zo. Het installeert
-alles vanzelf; dat duurt 5 tot 10 minuten.
+alles vanzelf; dat duurt 5 tot 15 minuten. Het venster loopt negen stappen af
+en **sluit nooit vanzelf bij een fout** — er blijft altijd staan wat er misging
+en wat je eraan kunt doen.
 
 > Waarschuwt Windows met "Windows heeft uw pc beschermd"? Klik op
 > **"Meer informatie"** en daarna op **"Toch uitvoeren"**. Dat komt doordat
@@ -123,16 +128,24 @@ het installatiebestand opnieuw en verbeter dat ene onderdeel.
 
 ## Starten
 
-Dubbelklik op **`START-JARVIS.bat`**.
+Dubbelklik op **`start.bat`** (of `START-JARVIS.bat`).
 
 Er gebeurt dit:
 
-1. Je sleutels worden gecontroleerd.
-2. Twee zwarte vensters openen: één voor de bot, één voor het dashboard.
-3. Je browser opent vanzelf op **http://127.0.0.1:8000**.
+1. Je sleutels worden gecontroleerd — alleen leesvragen, er wordt niets
+   gekocht of verkocht.
+2. De systeemcontrole draait: Python, pakketten, configuratie, sleutels,
+   handelsmotor, dashboard en extensie.
+3. Twee zwarte vensters openen: het dashboard en de achtergronddienst voor de
+   Chrome-extensie.
+4. De bot zelf start onder een **bewaker**. Crasht hij door een storing, dan
+   wordt hij vanzelf opnieuw gestart met een oplopende wachttijd. Bij een
+   configuratiefout stopt de bewaker juist meteen en legt uit wat er mis is —
+   opnieuw proberen zou dat toch niet oplossen.
+5. Je browser opent vanzelf op **http://127.0.0.1:8000**.
 
-**Laat die twee zwarte vensters open staan.** Ze sluiten betekent dat JARVIS
-stopt.
+**Laat die twee zwarte vensters open staan.** Ze sluiten betekent dat het
+dashboard en de extensie-dienst stoppen.
 
 Bovenaan het dashboard zie je meteen hoe het ervoor staat:
 
@@ -147,7 +160,41 @@ Bij oranje of rood staat er altijd bij wát er mis is. Dubbelklik dan
 
 ## Stoppen
 
-Sluit de twee zwarte vensters. Of klik erin en druk op **Ctrl + C**.
+Dubbelklik op **`stop.bat`**.
+
+Dat is de juiste manier: de bot krijgt een *net* stopverzoek en mag een lopende
+handelscyclus afmaken. Dat kan een halve minuut duren — dat hoort zo. De
+vensters gewoon wegklikken zou de bot midden in een handeling kunnen afbreken.
+
+**Herstarten** doe je met `restart.bat`. Die stopt eerst en start pas daarna,
+en weigert te starten als het stoppen niet gelukt is — twee bots die dezelfde
+posities beheren is het laatste wat je wilt.
+
+---
+
+## De Chrome-extensie
+
+Wil je JARVIS vanuit je browser bedienen in plaats van met zwarte vensters:
+
+1. Open Chrome en ga naar `chrome://extensions`
+2. Zet rechtsboven **Ontwikkelaarsmodus** aan.
+3. Klik op **Uitgepakte extensie laden** en kies de map **`extension`**.
+4. Klik op het JARVIS-icoontje, dan op **Instellingen**.
+5. Open `state\control_token.txt` met Kladblok, kopieer de regel en plak hem
+   in het veld *Toegangssleutel*. Klik op **Opslaan** en **Verbinding testen**.
+
+Je kunt dan starten, stoppen, herstarten, de systeemcontrole bekijken en de
+laatste logregels lezen. Je API-sleutels zitten **niet** in de extensie; die
+blijven in het programma op je pc.
+
+---
+
+## Werkt er iets niet?
+
+Dubbelklik op **`diagnose.bat`**. Die controleert Windows, Python, de
+pakketten, je configuratie, de draaiende processen, de poorten en draait een
+zelftest. Je krijgt per onderdeel `[OK]`, `[LET OP]`, `[OFFLINE]` of `[FOUT]`
+te zien, met erbij wat je eraan kunt doen.
 
 ---
 
@@ -176,11 +223,15 @@ Je krijgt per dienst te zien of het gelukt is.
 |---|---|
 | "Python is niet gevonden" | Python opnieuw installeren, mét het vinkje bij "Add python.exe to PATH" |
 | "Node.js is niet gevonden" | Node.js installeren via nodejs.org, knop met LTS |
-| Het venster sluit meteen | Rechtermuisklik op het bestand → "Bewerken" is *niet* nodig; dubbelklik gewoon opnieuw en lees de laatste regels |
+| Het venster sluit meteen | Dat hoort niet te kunnen: elk venster pauzeert bij een fout. Gebeurt het toch, draai dan `diagnose.bat` |
 | "SETUP REQUIRED" | Een sleutel ontbreekt. Draai het installatiebestand opnieuw |
 | "CONFIGURATION ERROR" | Een sleutel is onbruikbaar. Het scherm noemt welke; haal hem opnieuw op |
+| "niet bereikbaar" bij de sleutelcontrole | Een netwerkprobleem, **geen** sleutelprobleem. Je installatie is niet stuk; probeer het later opnieuw |
 | Browser zegt "kan geen verbinding maken" | Wacht 10 seconden en ververs. Het dashboardvenster moet openstaan |
+| "poort al in gebruik" | Een ander programma bezet poort 8000 of 8770. `diagnose.bat` laat zien welke. Wijzig `DASHBOARD_PORT` of `JARVIS_CONTROL_PORT` in `.env` |
 | Coinbase-sleutel wordt afgewezen | Controleer of je hem niet half hebt gekopieerd. De `privateKey` is één lange regel |
+| Het botvenster is verdwenen | Kijk in `logs\supervisor.log`. Daar staat wat er gebeurde en of er herstart is |
+| Extensie zegt "JARVIS draait nu niet op deze pc" | De achtergronddienst draait niet. Dubbelklik op `start.bat` |
 
 ---
 
@@ -189,7 +240,10 @@ Je krijgt per dienst te zien of het gelukt is.
 | Bestand | Wat het is |
 |---|---|
 | `.env` | Je sleutels. **Nooit delen, nooit doorsturen.** |
-| `logs\` | Wat de bot heeft gedaan |
+| `logs\loop.log` | Wat de bot heeft gedaan |
+| `logs\supervisor.log` | Wat de bewaker deed: starten, crashes, wachttijden |
+| `logs\control_service.log` | De achtergronddienst voor de extensie |
+| `state\control_token.txt` | Toegangssleutel voor de Chrome-extensie |
 | `reports\` | Rapporten van de bot |
 
 Je sleutels worden alleen op je eigen computer bewaard, in `.env`. Ze worden
@@ -205,6 +259,6 @@ doorloopt alle beslissingen, maar stuurt **geen** orders naar Coinbase.
 
 Live gaan is een aparte, bewuste beslissing waarbij je meerdere
 veiligheidsschakelaars één voor één moet omzetten. Dat staat beschreven in
-`README.md` en in de map `docs\`. Doe dat pas als je begrijpt wat elke
-schakelaar doet. Zolang `EXECUTION_MODE=paper` staat, kan er niets misgaan
-met echt geld.
+`docs\TECHNISCHE-README.md` en in de map `docs\`. Doe dat pas als je begrijpt
+wat elke schakelaar doet. Zolang `EXECUTION_MODE=paper` staat, kan er niets
+misgaan met echt geld.

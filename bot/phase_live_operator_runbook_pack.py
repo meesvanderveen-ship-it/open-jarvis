@@ -1,9 +1,16 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from pathlib import Path
 from typing import Any, Dict, Iterable, List
 
 from bot.phase_d6_metrics import d6_metric_safety_flags, now_iso
+
+# De runbook noemde hier een vast serverpad (/root/apps/Crypto/coinbase_bot).
+# Op elke andere machine -- en dus op elke Windows-pc -- wees dat naar een map
+# die niet bestaat, waardoor de operator-instructie onbruikbaar was. De
+# projectmap afleiden uit dit bestand klopt overal.
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 PHASE_LIVE_OPERATOR_RUNBOOK_PACK = "live_operator_runbook_pack_v1"
@@ -395,7 +402,7 @@ def build_operator_started_24h_live_test_pack(
             "blocks_run": hard_blockers,
         },
         "start_instructions": {
-            "working_directory": "/root/apps/Crypto/coinbase_bot",
+            "working_directory": str(PROJECT_ROOT),
             "venv_activation": "source .venv/bin/activate",
             "preferred_operator_start": "Use the operator-maintained start bash only after it is verified to set BTC-USDC-only tiny-budget live scope.",
             "repo_direct_start_if_no_bash_exists": BTC_USDC_TINY_DIRECT_START_COMMAND,

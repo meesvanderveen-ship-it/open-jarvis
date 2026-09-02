@@ -1,3 +1,14 @@
 # Reproduceerbare lokale testlaag. Runtime packages staan vast in requirements.txt.
 -r requirements.txt
-pytest==7.4.4
+
+# Het dashboard en de control-service horen hier ook bij: pytest.ini verzamelt
+# dashboard/backend/tests mee, en die importeren fastapi. Zonder deze regel
+# breekt een kale `pytest` af op een collection error voordat er ook maar één
+# test gedraaid heeft.
+-r dashboard/backend/requirements.txt
+
+# pytest stond hier eerder op ==7.4.4 terwijl dashboard/backend/requirements.txt
+# >=8,<9 eist. Wie beide lijsten installeerde kreeg stilzwijgend een andere
+# versie dan de pin beloofde, afhankelijk van de volgorde. Eén pin binnen het
+# venster dat de backend eist, lost dat op.
+pytest==8.4.2

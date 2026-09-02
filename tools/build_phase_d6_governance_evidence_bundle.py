@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import shutil
@@ -25,13 +26,33 @@ def _run(args: List[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(args, cwd=PROJECT_ROOT, text=True, capture_output=True, check=True)
 
 
+#: De bestanden waarvan de hash als bewijs in de bundel komt.
+_HASHED_STATE_FILES = ("state/open_orders.json", "state/positions.json")
+
+
 def _state_hashes() -> Dict[str, str]:
-    result = _run(["sha256sum", "state/open_orders.json", "state/positions.json"])
+    """SHA-256 van de statusbestanden, als bewijs dat er niets gemuteerd is.
+
+    Werd berekend door het externe commando `sha256sum`. Dat bestaat niet op
+    Windows, waardoor dit hele hulpprogramma daar altijd afbrak op een
+    FileNotFoundError. Bovendien gaf `sha256sum` een foutcode zodra een van de
+    twee bestanden nog niet bestond -- wat op een verse installatie normaal is,
+    voordat er ooit een order geweest is. Beide gevallen leverden een kale
+    traceback op in plaats van een bruikbaar rapport.
+
+    hashlib doet exact hetzelfde, op elk platform, en een ontbrekend bestand
+    wordt als zodanig gerapporteerd in plaats van als crash.
+    """
     hashes: Dict[str, str] = {}
-    for line in result.stdout.splitlines():
-        parts = line.split()
-        if len(parts) >= 2:
-            hashes[parts[1]] = parts[0]
+    for relative in _HASHED_STATE_FILES:
+        path = PROJECT_ROOT / relative
+        try:
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        except FileNotFoundError:
+            digest = "file_absent"
+        except OSError as exc:
+            digest = f"unreadable:{type(exc).__name__}"
+        hashes[relative] = digest
     return hashes
 
 

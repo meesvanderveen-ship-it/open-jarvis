@@ -1,0 +1,105 @@
+# Continue integratie voor JARVIS.
+#
+# Deze workflow stond eerder in dashboard/frontend/.github/workflows/. GitHub
+# leest alleen .github/workflows/ in de repository-root, dus hij werd nooit
+# uitgevoerd. Hij triggerde bovendien op een branch 'main' die deze repository
+# niet heeft, en gebruikte pnpm terwijl het project npm en package-lock.json
+# gebruikt. Die workflow blijft ongewijzigd staan voor de frontend zelf; deze
+# hier is de werkende versie voor het geheel.
+#
+# CI zet nooit een live-handelspoort aan en plaatst nooit een order. Er staat
+# geen .env in de repository, dus de bot draait hier per definitie zonder
+# credentials en doet geen enkele externe aanroep.
+
+name: Tests
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # De ondergrens uit tools/check_python.py en de aanbevolen versie uit
+        # .python-version. Beide moeten blijven werken.
+        python-version: ['3.11', '3.12']
+
+    steps:
+      - name: Repository ophalen
+        uses: actions/checkout@v4
+
+      - name: Python installeren
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+            dashboard/backend/requirements.txt
+
+      - name: Python-versie controleren
+        run: python tools/check_python.py
+
+      - name: Pakketten installeren
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+
+      - name: Testsuite draaien
+        # Deze suite heeft honderd verwachte failures: veiligheidsmaatregelen
+        # die hun werk doen. `|| true` omdat de beoordeling in de volgende stap
+        # gebeurt, tegen het vastgelegde register.
+        run: python -m pytest -q -p no:cacheprovider > pytest-uitvoer.txt 2>&1 || true
+
+      - name: Controleren op nieuwe failures
+        run: python tools/check_no_new_failures.py pytest-uitvoer.txt
+
+      - name: Testuitvoer bewaren
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-uitvoer-py${{ matrix.python-version }}
+          path: pytest-uitvoer.txt
+          retention-days: 14
+
+  extension:
+    name: Chrome-extensie
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Repository ophalen
+        uses: actions/checkout@v4
+
+      - name: Python installeren
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Pakketten installeren
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+
+      - name: Extensie, batchbestanden en documentatie controleren
+        run: |
+          python -m pytest -q -p no:cacheprovider \
+            tests/test_chrome_extension.py \
+            tests/test_windows_compatibility.py \
+            tests/test_documentation.py
