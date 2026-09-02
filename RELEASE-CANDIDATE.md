@@ -72,8 +72,11 @@ ZIP. Wat erbij is gekomen, gaat over installeren, draaiend blijven en bedienen.
 
 ### Gerepareerde defecten
 
-Negen echte defecten, elk gevonden door de software te draaien en elk bewezen
-door de reparatie terug te draaien en de test opnieuw te zien falen:
+Elf echte defecten. Negen zijn gevonden door de software te draaien en bewezen
+door de reparatie terug te draaien en de test opnieuw te zien falen; de laatste
+twee zijn gevonden doordat CI op een andere machine draait dan deze — als
+gewone gebruiker en met systemd — en zijn onder diezelfde omstandigheden
+nagespeeld en daarna opgelost gemeten:
 
 1. `RetryPolicy.from_env` negeerde omgevingsvariabelen — de code-standaard
    overschreef de ingestelde waarde.
@@ -92,6 +95,14 @@ door de reparatie terug te draaien en de test opnieuw te zien falen:
 7. De gezondheidscontrole meldde geïnstalleerde pakketten als ontbrekend.
 8. `NameError` in het foutpad van de gezondheidscontrole.
 9. De extensie meldde "JARVIS draait nu niet op deze pc" na één netwerkhapering.
+10. De replica-audit viel om met een `PermissionError` op iedere machine waar
+    de gebruiker geen beheerder is. Een van de standaard zoekpaden ligt onder
+    `/root`, en `Path.exists()` geeft daar geen `False` maar een fout:
+    het slikt alleen "bestaat niet", niet "geen toegang".
+11. `systemctl show` op een unit die systemd niet kent geeft geen foutcode maar
+    `ActiveState=inactive` — precies alsof de dienst bestaat en stilstaat. Op
+    elke machine mét systemd maar zónder deze unit meldde de status daardoor
+    "de bot draait niet", terwijl er niets gemeten was.
 
 Daarnaast zijn zeven failures uit de ZIP opgelost: vijf door lekkende
 teststubs, één ontbrekende methode in een testdubbel en één test die naar een
@@ -106,7 +117,7 @@ hardgecodeerd pad (`/root/apps/Crypto/coinbase_bot`) keek.
 | Gemeten op | 2 september 2026 |
 | Python | 3.11.15 (Linux) |
 | Commando | `python -m pytest -q` |
-| Uitkomst | **2959 geslaagd, 103 gefaald, 2 overgeslagen** |
+| Uitkomst | **2961 geslaagd, 103 gefaald, 3 overgeslagen** |
 | Nieuwe failures ten opzichte van de ZIP | **0** |
 | Opgeloste failures uit de ZIP | 7 |
 
@@ -152,7 +163,17 @@ lezen:
 - **`.env` blijft behouden**: bij het opnieuw instellen van een sleutel bleven
   bestaande regels, commentaar en volgorde staan.
 - **De CI-bewaker doet wat hij belooft**: een kunstmatig toegevoegde failure
-  gaf exitcode 1, een kunstmatig verwijderde bekende failure exitcode 2.
+  gaf exitcode 1, een kunstmatig verwijderde bekende failure exitcode 2. En hij
+  heeft zich meteen bewezen: de eerste echte CI-run vond twee defecten die op
+  deze machine niet optreden, omdat hier als beheerder en zonder systemd
+  gedraaid wordt.
+- **De suite als gewone gebruiker (uid 65534), met een systemd die de unit niet
+  kent** — dezelfde omstandigheden als de bouwmachine: 103 gefaald, nul nieuwe
+  failures. Vóór de reparatie faalden hier drie tests extra.
+- **CI staat groen** op Python 3.11 en 3.12, plus de aparte controle op
+  extensie, batchbestanden en documentatie. Dat is groen in de betekenis die
+  hier telt: nul nieuwe failures ten opzichte van het register — de 103
+  verklaarde failures staan nog steeds rood, en horen dat te doen.
 
 ---
 
